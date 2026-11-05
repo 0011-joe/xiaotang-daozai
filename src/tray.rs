@@ -606,10 +606,18 @@ mod tests {
         assert_eq!(labels(), ["开机启动", "吉祥物", "极简刘海", "关于岛仔", "退出", "设置…"]);
     }
 
+    #[cfg(has_rc)]
     #[test]
     fn icon_resource_is_embedded() {
-        // 托盘图标必须来自 exe 资源 #1（rc.exe 编入），不是临时画的
+        // 有 rc.exe 时，托盘图标必须来自 exe 资源 #1，而不是临时画的
         assert!(load_resource_icon().is_some(), "RT_GROUP_ICON #1 取不到");
+    }
+
+    #[test]
+    fn tray_icon_is_available_without_rc() {
+        // 没有 Windows SDK/rc.exe 的构建也必须能回退到内嵌 ICO。
+        assert!(load_embedded_icon().is_some(), "内嵌 ICO 兜底失效");
+        assert!(load_icon().is_some(), "托盘图标必须始终可用");
     }
 
     #[test]

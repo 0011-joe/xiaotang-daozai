@@ -60,10 +60,11 @@ impl App {
             c.text(121.0,47.0,"暂无音乐",14.0,W::Bold,theme::WHITE,H::Left);
         } else {
             let text_x=if with_lyrics {99.0}else{121.0};
-            let text_width=if with_lyrics {123.0}else{220.0};
-            let title_size=if with_lyrics {12.0}else{14.0};
-            c.text(text_x,if with_lyrics {41.0}else{53.0},&c.fit(&np.title,title_size,W::Bold,text_width),title_size,W::Bold,theme::WHITE,H::Left);
-            c.text(text_x,if with_lyrics {57.0}else{67.0},&c.fit(&np.artist,size::BODY,W::Regular,text_width),size::BODY,W::Regular,theme::GRAY,H::Left);
+            let text_width=if with_lyrics {130.0}else{220.0};
+            let title_size=if with_lyrics {15.0}else{16.0};
+            let artist_size=if with_lyrics {12.5}else{13.0};
+            c.text(text_x,if with_lyrics {44.0}else{53.0},&c.fit(&np.title,title_size,W::Bold,text_width),title_size,W::Bold,theme::WHITE,H::Left);
+            c.text(text_x,if with_lyrics {63.0}else{70.0},&c.fit(&np.artist,artist_size,W::Regular,text_width),artist_size,W::Regular,theme::GRAY,H::Left);
             if with_lyrics {self.draw_music_lyrics(c);}
         }
 
@@ -158,7 +159,7 @@ impl App {
                 let y=64.0+distance*29.0-galley.size().y/(2.0*c.s);
                 row.painter.galley(row.pos(246.0,y),galley,ink);
             }
-            if !lyrics.synced {col.text(246.0,39.0,"文本歌词",8.0,W::Regular,theme::GRAY,H::Left);}
+            if !lyrics.synced {col.text(246.0,39.0,"文本歌词",size::MIN,W::Regular,theme::GRAY,H::Left);}
         } else {
             let status=if self.ly.loading {"正在查找歌词…"}else if let Some(error)=&self.ly.error {error.label()}else{"暂无歌词"};
             let galley=col.painter.layout(status.into(),col.font(10.0,W::Regular),theme::GRAY,130.0*c.s);
@@ -739,8 +740,8 @@ impl App {
                     let subject_w=row_w-118.0-if *hidden {34.0}else{0.0};
                     let width=row.text(74.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,Color32::from_gray(200),H::Left);
                     if *hidden {
-                        row.fill(78.0+width,5.0,30.0,12.0,3.0,theme::BTN);
-                        row.text(93.0+width,14.0,"已隐藏",8.5,W::Regular,theme::GRAY,H::Center);
+                        row.fill(78.0+width,4.0,30.0,14.0,3.0,theme::BTN);
+                        row.text(93.0+width,14.5,"已隐藏",size::MIN,W::Regular,theme::GRAY,H::Center);
                     }
                     row.text(row_w-6.0,14.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
                     row.seg((6.0,row_h-0.5),(row_w-6.0,row_h-0.5),0.5,Color32::from_gray(40));

@@ -20,6 +20,10 @@ struct Shell {
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
+    /// 当前界面缩放；变化时同步放大原生窗口，避免内容被裁切。
+    ui_scale: f32,
+    /// 岛体周围桌面颜色，供玻璃材质使用；采样失败时为 None。
+    backdrop: Option<[f32; 3]>,
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -107,6 +111,8 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
+            ui_scale: 1.0,
+            backdrop: None,
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -180,10 +186,12 @@ impl Shell {
             self.sys = (b, c, PollClock::now());
         }
         let ppp = ctx.pixels_per_point();
+        // 岛体本地坐标：物理像素 ÷（原生 DPI × 岛体缩放），与设置窗口的 zoom 无关。
+        let island_scale = ppp / ctx.zoom_factor().max(0.1) * self.app.settings.scale();
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
         #[cfg(windows)]
-        let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
-        let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
+        let origin=self.native.as_ref().and_then(|w|w.logical_origin(island_scale)).unwrap_or(origin);
+        let cursor = cursor_logical(island_scale).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
         Env {
             t: self.t0.elapsed().as_secs_f64(),
             clock,
@@ -205,6 +213,7 @@ impl Shell {
             volume: self.system_state.volume,
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
+            backdrop: self.backdrop,
         }
     }
 }
@@ -216,6 +225,12 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        // 缩放变化时把原生窗口一起放大，保持逻辑画布仍是 CANVAS_W×WIN_H。
+        let scale=self.app.settings.scale();
+        if (self.ui_scale-scale).abs()>1e-3 {
+            self.ui_scale=scale;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(app::CANVAS_W*scale,app::WIN_H*scale)));
+        }
         #[cfg(windows)]
         {
             // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
@@ -231,12 +246,14 @@ impl eframe::App for Shell {
             self.app.foreground_changed();
         }
         #[cfg(windows)]
-        if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_at.ready(Duration::from_secs(1)) {
+        let island_scale=ctx.pixels_per_point()/ctx.zoom_factor().max(0.1)*scale;
+        #[cfg(windows)]
+        if !self.placed || self.placement_scale!=island_scale || self.placement_at.ready(Duration::from_secs(1)) {
             self.placement_at=PollClock::now();
-            self.placement_scale=ctx.pixels_per_point();
+            self.placement_scale=island_scale;
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,d.work_top))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -244,6 +261,7 @@ impl eframe::App for Shell {
                 // Do not leave a hidden startup window forever when monitor discovery fails.
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
+            self.backdrop=self.native.as_ref().and_then(|w|w.backdrop());
         }
         #[cfg(not(windows))]
         if !self.placed {

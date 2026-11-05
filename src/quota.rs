@@ -6,6 +6,8 @@ use base64::Engine;
 pub(crate) mod grok;
 #[path="gemini_quota.rs"]
 pub(crate) mod gemini;
+#[path="doubao_quota.rs"]
+pub(crate) mod doubao;
 #[path="claude_quota.rs"]
 mod claude;
 #[path="native_auth.rs"]
@@ -20,11 +22,11 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, Doubao }
 impl Provider {
-    pub const ALL: [Self; 5] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini"} }
-    fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
+    pub const ALL: [Self; 6] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::Doubao];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::Doubao=>"豆包"} }
+    fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}if s.eq_ignore_ascii_case("doubao"){return Some(Self::Doubao);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Accent { #[default] Brand, Violet, Orange, Blue, Cyan, Pink, Gold, Green }
@@ -59,6 +61,7 @@ impl Config {
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
+        if provider==Provider::Doubao{return Err("请使用浏览器或 Cookie 连接豆包网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
         if provider==Provider::Claude&&claude::is_desktop(&source){return self.import_claude(&source,&alias).map(|_|());}
         if !source.is_file(){return Err("请选择已有的登录 JSON 文件".into());}
@@ -86,6 +89,13 @@ impl Config {
         }
         let id=format!("Gemini-{slot}");let pinned=self.pinned_indices().len()<3;
         self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::Gemini,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
+    }
+    pub(crate) fn connect_doubao(&mut self,slot:String,alias:String)->String{
+        if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Doubao && a.slot.as_deref()==Some(&slot)){
+            a.enabled=true;if !alias.trim().is_empty(){a.alias=alias;}self.selected=a.id.clone();return a.id.clone();
+        }
+        let id=format!("Doubao-{slot}");let pinned=self.pinned_indices().len()<3;
+        self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::Doubao,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
     }
     pub(crate) fn import_grok(&mut self,path:&Path,alias:&str)->Result<usize,String>{
         let profiles=grok::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
@@ -159,6 +169,7 @@ fn codex_window(v:&Value)->Option<Window>{
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider==Provider::GrokBot{return grok::parse(v);}
     if provider==Provider::Gemini{return gemini::parse(v);}
+    if provider==Provider::Doubao{return doubao::parse(v);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     match provider {
         Provider::Codex=>{
@@ -176,7 +187,7 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::GrokBot|Provider::Gemini=>unreachable!(),
+        Provider::GrokBot|Provider::Gemini|Provider::Doubao=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -194,7 +205,7 @@ fn account_credentials(account:&Account)->Result<Credential,String>{
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini|Provider::Doubao=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -242,8 +253,9 @@ fn http_agent()->ureq::Agent{
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
+    if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini|Provider::Doubao=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     if account.provider==Provider::Claude{req=req.set("anthropic-beta","oauth-2025-04-20");}
@@ -252,6 +264,43 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if auth.stamp!=fs::metadata(&account.source).and_then(|m|m.modified()).ok(){return Err(("登录信息已变化，请刷新额度".into(),0));}
     let value=serde_json::from_str(&body).map_err(|_|("服务没有返回有效的额度数据".into(),60))?;
     parse(account.provider,&value).map_err(|e|(e,60))
+}
+
+#[cfg(windows)]
+fn protect_doubao(raw:&[u8],encrypt:bool)->Result<Vec<u8>,String>{
+    use windows::Win32::{Foundation::{HLOCAL,LocalFree},Security::Cryptography::{CryptProtectData,CryptUnprotectData,CRYPT_INTEGER_BLOB,CRYPTPROTECT_UI_FORBIDDEN}};
+    let input=CRYPT_INTEGER_BLOB{cbData:raw.len().try_into().map_err(|_|"豆包登录信息过长")?,pbData:raw.as_ptr().cast_mut()};let mut output=CRYPT_INTEGER_BLOB::default();
+    unsafe{
+        if encrypt{CryptProtectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}else{CryptUnprotectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}.map_err(|_|"无法访问 Windows 安全保存的豆包登录")?;
+        let bytes=std::slice::from_raw_parts(output.pbData,output.cbData as usize).to_vec();let _=LocalFree(HLOCAL(output.pbData.cast()));Ok(bytes)
+    }
+}
+#[cfg(not(windows))]
+fn protect_doubao(_raw:&[u8],_encrypt:bool)->Result<Vec<u8>,String>{Err("当前系统暂不支持安全保存豆包登录".into())}
+
+fn bridge(agent:&ureq::Agent,action:&str,args:Value)->Result<Value,String>{
+    let body=json!({"action":action,"args":args,"session":"daozai-doubao"});
+    let response=agent.post("http://127.0.0.1:10086/command").set("Content-Type","application/json").send_string(&body.to_string()).map_err(|_|"未连接 Kimi 浏览器扩展；可先连接扩展，或使用 Cookie 连接")?;
+    let mut raw=String::new();response.into_reader().take(2*1024*1024).read_to_string(&mut raw).map_err(|_|"无法读取浏览器会话")?;
+    let value:Value=serde_json::from_str(&raw).map_err(|_|"浏览器扩展返回无效数据")?;
+    if value["ok"]!=true{return Err("无法读取豆包标签页，请检查浏览器扩展连接".into());}
+    value.get("data").cloned().ok_or_else(||"无法读取浏览器会话".into())
+}
+/// 从浏览器里读取指定站点的 Cookie 请求头；需要 Kimi 浏览器扩展。
+fn browser_cookie_header(host:&str,page_url:&str,hint:&str)->Result<String,String>{
+    let domain=host.strip_prefix("www.").unwrap_or(host);
+    let matches=|value:&str|value==host||value==domain||value.ends_with(&format!(".{domain}"));
+    let agent=ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).redirects(0).build();
+    let response=bridge(&agent,"list_browser_tabs",json!({}))?;
+    let mut tabs=response["tabs"].as_array().ok_or("无法读取浏览器标签页")?.iter().filter(|tab|tab["url"].as_str().and_then(|s|url::Url::parse(s).ok()).is_some_and(|u|u.scheme()=="https"&&u.host_str().is_some_and(matches))).collect::<Vec<_>>();
+    if tabs.is_empty(){return Err(format!("请先在浏览器打开 {page_url} 并登录{hint}，再连接当前浏览器"));}
+    tabs.sort_by_key(|tab|!tab["active"].as_bool().unwrap_or(false));
+    bridge(&agent,"attach_tab",json!({"tabId":tabs[0]["tabId"]}))?;
+    let result=bridge(&agent,"cdp",json!({"method":"Network.getCookies","params":{"urls":[page_url]}}))?;
+    let cookies=result["cookies"].as_array().ok_or("无法读取登录会话")?;
+    let header=cookies.iter().filter(|cookie|cookie["domain"].as_str().is_some_and(matches)).filter_map(|cookie|Some(format!("{}={}",cookie["name"].as_str()?,cookie["value"].as_str()?))).collect::<Vec<_>>().join("; ");
+    if header.is_empty(){return Err(format!("浏览器里没有找到{hint}登录会话"));}
+    Ok(header)
 }
 
 #[cfg(test)] mod tests {

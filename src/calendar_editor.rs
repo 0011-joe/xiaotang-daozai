@@ -1,5 +1,5 @@
 //! 岛内本机日程表单。
-use crate::{app::{App,Cmd,CALENDAR_PAGE},local_calendar::{self,Draft},paint::{self,Card,H},theme::{self,W}};
+use crate::{app::{App,Cmd,CALENDAR_PAGE},local_calendar::{self,Draft},paint::{self,Card,H},theme::{self,size,W}};
 use eframe::egui::{self,Color32};
 
 impl App {
@@ -48,13 +48,13 @@ impl App {
         let (all_day,b)=paint::capsule(c,294.0,72.0,76.0,21.0,"calendar-editor-all-day",if d.all_day{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER);
         b.centered_text(332.0,82.5,if d.all_day{"✓ 全天"}else{"全天"},10.0,W::Regular,theme::WHITE,H::Center);
         if all_day.clicked(){d.all_day=!d.all_day;d.error.clear();}
-        if d.all_day {c.centered_text(214.0,114.0,"包含结束当天",8.5,W::Regular,theme::GRAY,H::Left);}
+        if d.all_day {c.centered_text(214.0,114.0,"包含结束当天",size::MIN,W::Regular,theme::GRAY,H::Left);}
         let options=if d.all_day{vec![(None,"不提醒"),(Some(0),"当天 09:00")]}else{vec![(None,"不提醒"),(Some(0),"准时"),(Some(5),"提前5分"),(Some(15),"提前15分"),(Some(30),"提前30分")]};
         let width=if d.all_day{126.0}else{54.0};
         for (i,(value,label)) in options.into_iter().enumerate(){
             let x=86.0+i as f32*(width+3.0);let on=if d.all_day{d.reminder.is_some()==value.is_some()}else{d.reminder==value};
             let (r,b)=paint::capsule(c,x,136.0,width,21.0,&format!("calendar-editor-reminder-{i}"),if on{Color32::from_rgb(28,65,100)}else{theme::BTN},theme::BTN_HOVER);
-            b.centered_text(x+width/2.0,146.5,label,8.4,W::Regular,theme::WHITE,H::Center);
+            b.centered_text(x+width/2.0,146.5,label,size::MIN,W::Regular,theme::WHITE,H::Center);
             if r.clicked(){d.reminder=value;}
         }
         let message=if d.error.is_empty(){"本机保存 · 日期 年-月-日 · 时间 时:分"}else{&d.error};
@@ -73,8 +73,9 @@ impl App {
     }
     pub(crate) fn calendar_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){
         let Some(d)=self.calendar.draft.as_mut() else{return;};
-        let mut input=|text:&mut String,id:&str,x:f32,y:f32,width:f32|ui.put(egui::Rect::from_min_size(origin+egui::vec2(x,y),egui::vec2(width,19.0)),
-            egui::TextEdit::singleline(text).id(egui::Id::new(id)).frame(false).margin(egui::Margin::ZERO).text_color(theme::WHITE).font(theme::font(11.0,W::Regular)));
+        let s=self.settings.scale()/ui.ctx().zoom_factor().max(0.1);
+        let mut input=|text:&mut String,id:&str,x:f32,y:f32,width:f32|ui.put(egui::Rect::from_min_size(origin+egui::vec2(x*s,y*s),egui::vec2(width*s,19.0*s)),
+            egui::TextEdit::singleline(text).id(egui::Id::new(id)).frame(false).margin(egui::Margin::ZERO).text_color(theme::WHITE).font(theme::font(11.0*s,W::Regular)));
         let name=input(&mut d.title,"calendar-local-title",92.0,41.0,272.0);
         input(&mut d.start_date,"calendar-local-start-date",92.0,74.0,108.0);
         input(&mut d.end_date,"calendar-local-end-date",92.0,106.0,108.0);

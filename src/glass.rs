@@ -7,8 +7,10 @@
 //! - `crates/poni/res/glass.hlsl`：`dark = mat * (1 - tint)`、rim 与 glow 的叠加方式；
 //! - `crates/poni-core/src/look.rs`：玻璃底色与描边。
 //!
-//! 这里只保留「黑色叠加」这一条路径：`col = mat * (1 - tint)` 与「在背景上叠
-//! 一层黑色、alpha = tint」在数学上等价，正好能用 egui 的半透明填充表达。
+//! 这里用 egui 网格近似「烟熏玻璃」：半透明深色底、顶部柔光、rim/glow、
+//! 霜边和色散；没有桌面模糊采样时用 `dark_tint(None)` 的兜底着色。
+
+use eframe::egui::Color32;
 
 /// 看不到屏幕时的烟熏玻璃不透明度（oyenza `glass.rs:21`）。
 pub const SMOKED_OPACITY: f32 = 0.82;
@@ -33,6 +35,82 @@ pub const DISPERSION: f32 = 0.03;
 /// 深色玻璃的底色与描边（`poni-core/src/look.rs:139, 142`）。
 pub const GROUND_DARK: (u8, u8, u8) = (0x1C, 0x1C, 0x1E);
 pub const BORDER_ALPHA: f32 = 0.10;
+
+/// 一帧的玻璃材质。绘制层只读这里，避免各处自行解释常量。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Material {
+    pub ground: (u8, u8, u8),
+    pub tint: f32,
+    pub opacity: f32,
+    pub saturation: f32,
+    pub rim: f32,
+    pub glow: f32,
+    pub border: f32,
+    pub frost_lo: f32,
+    pub frost_hi: f32,
+    pub dispersion: f32,
+    pub shadow: f32,
+    pub thick: f32,
+}
+
+/// 按当前高度、桌面色和忙碌程度生成材质。
+pub fn material(height: f32, backdrop: Option<[f32; 3]>, busy: f32) -> Material {
+    let thick = thickness(height);
+    let tint = dark_tint(backdrop);
+    // 收起的小条更实，展开面板允许透出一点桌面；与烟熏玻璃的观感一致。
+    let opacity = (SMOKED_OPACITY + (1.0 - SMOKED_OPACITY) * (1.0 - thick) * 0.5).clamp(0.0, 1.0);
+    Material {
+        ground: GROUND_DARK,
+        tint,
+        opacity,
+        saturation: SATURATION,
+        rim: (rim_alpha() * (0.62 + 0.38 * thick)).clamp(0.0, 1.0),
+        glow: (GLOW_STRENGTH * (0.60 + 0.40 * thick)).clamp(0.0, 0.5),
+        border: BORDER_ALPHA,
+        frost_lo: FROST_LO,
+        frost_hi: FROST_HI,
+        dispersion: DISPERSION,
+        shadow: shadow_alpha(busy, thick),
+        thick,
+    }
+}
+
+fn ground_rgba(m: &Material, lift: f32) -> [f32; 4] {
+    let [r, g, b] = [m.ground.0, m.ground.1, m.ground.2].map(|c| c as f32 / 255.0);
+    let mean = (r + g + b) / 3.0;
+    let saturated = |c: f32| (mean + (c - mean) * m.saturation).clamp(0.0, 1.0);
+    let dim = 1.0 - m.tint;
+    [(saturated(r) * dim + lift).clamp(0.0, 1.0), (saturated(g) * dim + lift).clamp(0.0, 1.0), (saturated(b) * dim + lift).clamp(0.0, 1.0), m.opacity]
+}
+
+/// 玻璃底色：地面色去饱和、按 tint 混黑，再乘烟熏不透明度。
+pub fn ground_color(m: &Material) -> Color32 {
+    let [r, g, b, a] = ground_rgba(m, 0.0);
+    Color32::from_rgba_unmultiplied((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8, (a * 255.0).round() as u8)
+}
+
+/// 顶部柔光：同一底色抬亮 `glow`，填充时从上到下渐变回底色。
+pub fn sheen_color(m: &Material) -> Color32 {
+    let [r, g, b, a] = ground_rgba(m, m.glow * 0.55);
+    Color32::from_rgba_unmultiplied((r * 255.0).round() as u8, (g * 255.0).round() as u8, (b * 255.0).round() as u8, (a * 255.0).round() as u8)
+}
+
+/// 边缘高光：rim + border，色散让高光略偏暖。
+pub fn rim_color(m: &Material, facing: f32) -> Color32 {
+    let alpha = ((m.rim + m.border) * facing).clamp(0.0, 1.0);
+    let warm = (m.dispersion * 255.0 * 0.7).round() as u8;
+    Color32::from_rgba_unmultiplied(255, 255u8.saturating_sub(warm / 2), 255u8.saturating_sub(warm), (alpha * 255.0).round() as u8)
+}
+
+/// 内发光：贴着轮廓向内淡出。
+pub fn glow_color(m: &Material) -> Color32 {
+    Color32::from_white_alpha((m.glow * 255.0).round() as u8)
+}
+
+/// 霜边：比 glow 更宽、更淡的一层。
+pub fn frost_color(m: &Material) -> Color32 {
+    Color32::from_white_alpha((m.glow * 0.22 * 255.0).round() as u8)
+}
 
 /// 玻璃厚度：0 = 收起的小药丸，1 = 展开的面板。
 pub fn thickness(height: f32) -> f32 {
@@ -161,5 +239,36 @@ mod tests {
         assert_eq!(thickness(220.0), 1.0);
         assert!(thickness(140.0) > 0.5 && thickness(140.0) < 0.6);
         assert!((rim_alpha() - 0.24).abs() < 1e-6);
+    }
+
+    #[test]
+    fn material_wires_every_glass_layer() {
+        let thin = material(30.0, None, 0.0);
+        let thick = material(216.0, Some([1.0; 3]), 0.05);
+        assert!(thin.thick < 0.2 && thick.thick > 0.95);
+        assert_eq!(thin.tint, TINT_MIN, "没有背景样本时用烟熏兜底");
+        assert!(thick.tint > TINT_MIN && thick.tint <= TINT_MAX, "亮背景要加深着色");
+        assert!(thin.opacity > thick.opacity, "收起小条应比展开面板更实");
+        assert!(thin.opacity >= SMOKED_OPACITY);
+        assert!(thin.rim > 0.0 && thick.rim > thin.rim);
+        assert!(thin.glow > 0.0 && thick.glow >= thin.glow);
+        assert!(thin.shadow >= 0.12 && thick.shadow > thin.shadow);
+        assert_eq!(thin.border, BORDER_ALPHA);
+        assert_eq!(thin.frost_lo, FROST_LO);
+        assert_eq!(thin.frost_hi, FROST_HI);
+        assert_eq!(thin.dispersion, DISPERSION);
+    }
+
+    #[test]
+    fn material_colors_follow_tint_sheen_and_facing() {
+        let dark = material(140.0, Some([0.05; 3]), 0.0);
+        let bright = material(140.0, Some([1.0; 3]), 0.0);
+        assert!(ground_color(&bright).r() < ground_color(&dark).r(), "亮背景上的玻璃应更暗");
+        assert!(ground_color(&dark).a() >= (SMOKED_OPACITY * 255.0 * 0.99) as u8);
+        assert!(sheen_color(&dark).r() > ground_color(&dark).r(), "顶部柔光应比底色亮");
+        let rim = rim_color(&dark, 1.0);
+        assert!(rim.a() > rim_color(&dark, RIM_FACING_MIN).a(), "背光面 rim 应更弱");
+        assert_ne!(rim, Color32::WHITE, "色散应让边缘略偏暖");
+        assert!(glow_color(&dark).a() > frost_color(&dark).a(), "霜边应比内发光更淡");
     }
 }

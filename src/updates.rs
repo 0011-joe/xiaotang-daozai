@@ -108,9 +108,10 @@ impl State {
             ctx.load_texture("update-logo", egui::ColorImage::from_rgba_unmultiplied([icon.width as usize,icon.height as usize],&icon.rgba),egui::TextureOptions::LINEAR)
         }).id();
         let installing = self.rx.is_some() && self.cancel.is_none();
+        let viewport_scale=ctx.zoom_factor();
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("daozai-update"),
             egui::ViewportBuilder::default().with_title("岛仔更新").with_icon(theme::app_icon())
-                .with_inner_size([520.0, 416.0]).with_resizable(false).with_decorations(false)
+                .with_inner_size([520.0*viewport_scale, 416.0*viewport_scale]).with_resizable(false).with_decorations(false)
                 .with_transparent(true).with_active(true), |ctx, _| {
                 if focus {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));

@@ -3,7 +3,14 @@
 pub struct Bounds { pub left:i32, pub top:i32, pub right:i32, pub bottom:i32 }
 
 #[derive(Clone, Debug)]
-pub struct Display { pub id:String, pub label:String, pub bounds:Bounds, pub primary:bool }
+pub struct Display {
+    pub id:String,
+    pub label:String,
+    pub bounds:Bounds,
+    /// 工作区顶边；顶部任务栏时高于显示器顶边。
+    pub work_top:i32,
+    pub primary:bool,
+}
 
 pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
     displays.iter().find(|d|!id.is_empty()&&d.id==id)
@@ -23,10 +30,11 @@ pub fn connected()->Vec<Display>{
             let stable_id=if found{text(&details.DeviceID)}else{String::new()};
             let name=if found{text(&details.DeviceString)}else{String::new()};
             let number=device.trim_start_matches(r"\\.\DISPLAY");let r=info.monitorInfo.rcMonitor;
+            let work_top=info.monitorInfo.rcWork.top.max(r.top);
             let primary=info.monitorInfo.dwFlags&1!=0;
             let label=format!("显示器 {number}{} · {} × {}{}",if name.is_empty(){String::new()}else{format!(" · {name}")},r.right-r.left,r.bottom-r.top,if primary{" · 主屏"}else{""});
             let displays=&mut *(data.0 as *mut Vec<Display>);
-            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},primary});
+            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},work_top,primary});
         }
         BOOL(1)
     }
@@ -39,10 +47,15 @@ pub fn connected()->Vec<Display>{
 pub fn connected()->Vec<Display>{Vec::new()}
 
 pub fn island_origin(m:Bounds, island_width:f32, scale:f32)->Option<(i32,i32)> {
+    island_origin_at(m, m.top, island_width, scale)
+}
+
+/// `top` 允许传入 `rcWork.top`，让顶部任务栏不被岛体覆盖；水平仍按显示器居中。
+pub fn island_origin_at(m:Bounds, top:i32, island_width:f32, scale:f32)->Option<(i32,i32)> {
     if m.right<=m.left || m.bottom<=m.top || !scale.is_finite() || scale<=0.0 || !island_width.is_finite() || island_width<=0.0 {return None;}
     let width=(island_width as f64*scale as f64).round();
     let x=(m.left as f64+(m.right as f64-m.left as f64-width)/2.0).round();
-    Some((x.clamp(i32::MIN as f64,i32::MAX as f64) as i32,m.top))
+    Some((x.clamp(i32::MIN as f64,i32::MAX as f64) as i32,top.clamp(m.top,i32::MAX)))
 }
 
 #[cfg(test)]
@@ -59,8 +72,8 @@ mod tests {
         if !displays.is_empty(){assert_eq!(displays.iter().filter(|d|d.primary).count(),1);}
     }
     #[test] fn display_selection_survives_reordering_disconnect_and_reconnect(){
-        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},primary:true};
-        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},primary:false};
+        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work_top:0,primary:true};
+        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},work_top:-400,primary:false};
         for displays in [vec![primary.clone(),external.clone()],vec![external.clone(),primary.clone()]] {
             assert_eq!(selected(&displays,"").unwrap().id,"internal");
             let target=selected(&displays,"external").unwrap();assert_eq!(target.id,"external");
@@ -77,6 +90,10 @@ mod tests {
             (Bounds{left:300,top:-1440,right:2860,bottom:0},2.0,(940,-1440)),
             (Bounds{left:1920,top:200,right:3840,bottom:1280},1.25,(2480,200)),
         ] {assert_eq!(island_origin(m,640.0,scale),Some(want));}
+        // 顶部任务栏：水平仍居中，垂直从工作区顶边开始。
+        let m=Bounds{left:0,top:0,right:1920,bottom:1080};
+        assert_eq!(island_origin_at(m,40,640.0,1.0),Some((640,40)));
+        assert_eq!(island_origin_at(Bounds{left:-2560,top:-400,right:0,bottom:1040},-360,640.0,1.5),Some((-1760,-360)));
     }
     #[test] fn changing_primary_unplugging_and_dpi_recompute_without_stale_state(){
         let a=Bounds{left:0,top:0,right:1920,bottom:1080};

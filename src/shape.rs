@@ -58,25 +58,43 @@ fn edge_normal(pts: &[Pos2], i: usize) -> Vec2 {
 
 /// 抗锯齿填充。`feather` 是羽化宽度（逻辑点，通常 = 1 / ppp）。
 pub fn fill(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, color: Color32, feather: f32) {
-    let key=([rect.min.x,rect.min.y,rect.max.x,rect.max.y,flare,flare_h,radius,feather].map(f32::to_bits),color);
+    fill_gradient(painter, rect, flare, flare_h, radius, color, color, feather);
+}
+
+/// 上下渐变的抗锯齿填充；玻璃顶部柔光用。
+pub fn fill_gradient(painter: &egui::Painter, rect: Rect, flare: f32, flare_h: f32, radius: f32, top: Color32, bottom: Color32, feather: f32) {
+    let key=([rect.min.x,rect.min.y,rect.max.x,rect.max.y,flare,flare_h,radius,feather].map(f32::to_bits),top,bottom);
     let mesh=painter.ctx().memory_mut(|memory|memory.caches.cache::<FillCache>().get(key));
     painter.add(egui::Shape::Mesh(mesh));
 }
 
-type FillKey=([u32;8],Color32);
+type FillKey=([u32;8],Color32,Color32);
 type FillCache=egui::cache::FrameCache<std::sync::Arc<egui::Mesh>,FillComputer>;
 #[derive(Default)]
 struct FillComputer;
 impl egui::cache::ComputerMut<FillKey,std::sync::Arc<egui::Mesh>> for FillComputer {
-    fn compute(&mut self,(bits,color):FillKey)->std::sync::Arc<egui::Mesh>{
+    fn compute(&mut self,(bits,top,bottom):FillKey)->std::sync::Arc<egui::Mesh>{
         let [x0,y0,x1,y1,flare,flare_h,radius,feather]=bits.map(f32::from_bits);
-        std::sync::Arc::new(fill_mesh(Rect::from_min_max(Pos2::new(x0,y0),Pos2::new(x1,y1)),flare,flare_h,radius,color,feather))
+        std::sync::Arc::new(fill_mesh_gradient(Rect::from_min_max(Pos2::new(x0,y0),Pos2::new(x1,y1)),flare,flare_h,radius,top,bottom,feather))
     }
 }
 
+fn mix_color(a:Color32,b:Color32,t:f32)->Color32{
+    let t=t.clamp(0.0,1.0);
+    let mix=|a:u8,b:u8|(a as f32+(b as f32-a as f32)*t).round() as u8;
+    Color32::from_rgba_premultiplied(mix(a.r(),b.r()),mix(a.g(),b.g()),mix(a.b(),b.b()),mix(a.a(),b.a()))
+}
+
 // 仅保留当前帧仍使用的轮廓；尺寸、透明度或 DPI 改变时重新生成，动画不复用旧形状。
+#[cfg(test)]
 fn fill_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,feather:f32)->egui::Mesh {
+    fill_mesh_gradient(rect,flare,flare_h,radius,color,color,feather)
+}
+
+fn fill_mesh_gradient(rect:Rect,flare:f32,flare_h:f32,radius:f32,top:Color32,bottom:Color32,feather:f32)->egui::Mesh {
     let rows = sections(rect, flare, flare_h, radius);
+    let height=rect.height().max(1.0);
+    let at=|y:f32|mix_color(top,bottom,(y-rect.top())/height);
     let mut mesh = egui::Mesh::default();
     mesh.vertices.reserve((rows.len()*3-2)*4);
     mesh.indices.reserve((rows.len()*3-2)*6);
@@ -84,11 +102,12 @@ fn fill_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,feather:f3
     for w in rows.windows(2) {
         let (ya, la, ra) = w[0];
         let (yb, lb, rb) = w[1];
+        let (ca,cb)=(at(ya),at(yb));
         let i = mesh.vertices.len() as u32;
-        mesh.colored_vertex(Pos2::new(la, ya), color);
-        mesh.colored_vertex(Pos2::new(ra, ya), color);
-        mesh.colored_vertex(Pos2::new(rb, yb), color);
-        mesh.colored_vertex(Pos2::new(lb, yb), color);
+        mesh.colored_vertex(Pos2::new(la, ya), ca);
+        mesh.colored_vertex(Pos2::new(ra, ya), ca);
+        mesh.colored_vertex(Pos2::new(rb, yb), cb);
+        mesh.colored_vertex(Pos2::new(lb, yb), cb);
         mesh.add_triangle(i, i + 1, i + 2);
         mesh.add_triangle(i, i + 2, i + 3);
     }
@@ -108,12 +127,53 @@ fn fill_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,feather:f3
         }
         let (na, nb) = (edge_normal(&pts, i), edge_normal(&pts, i + 1));
         let base = mesh.vertices.len() as u32;
-        mesh.colored_vertex(a, color);
-        mesh.colored_vertex(b, color);
+        mesh.colored_vertex(a, at(a.y));
+        mesh.colored_vertex(b, at(b.y));
         mesh.colored_vertex(b + nb * feather, clear);
         mesh.colored_vertex(a + na * feather, clear);
         mesh.add_triangle(base, base + 1, base + 2);
         mesh.add_triangle(base, base + 2, base + 3);
+    }
+    mesh
+}
+
+/// 沿轮廓向内的边缘光/内发光。`width` 是向内宽度，`fade_to` 是底边保留的强度。
+pub fn rim(painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,width:f32,fade_to:f32){
+    if width<=0.0 || color.a()==0 {return;}
+    let mesh=rim_mesh(rect,flare,flare_h,radius,color,width,fade_to);
+    painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
+}
+
+fn rim_mesh(rect:Rect,flare:f32,flare_h:f32,radius:f32,color:Color32,width:f32,fade_to:f32)->egui::Mesh{
+    let pts=outline(rect,flare,flare_h,radius);
+    let n=pts.len();
+    let height=rect.height().max(1.0);
+    let fade=|p:Pos2|{
+        let t=((p.y-rect.top())/height).clamp(0.0,1.0);
+        let k=1.0+(fade_to.clamp(0.0,1.0)-1.0)*t;
+        Color32::from_rgba_premultiplied(
+            (color.r() as f32*k).round() as u8,
+            (color.g() as f32*k).round() as u8,
+            (color.b() as f32*k).round() as u8,
+            (color.a() as f32*k).round() as u8,
+        )
+    };
+    let mut mesh=egui::Mesh::default();
+    mesh.vertices.reserve(n*4);
+    mesh.indices.reserve(n*6);
+    for i in 0..n-1{
+        let (a,b)=(pts[i],pts[i+1]);
+        if a.y<=rect.top()+0.01 && b.y<=rect.top()+0.01 {continue;}
+        let (na,nb)=(edge_normal(&pts,i),edge_normal(&pts,i+1));
+        let base=mesh.vertices.len() as u32;
+        mesh.colored_vertex(a,fade(a));
+        mesh.colored_vertex(b,fade(b));
+        let inner_b=Pos2::new(b.x-nb.x*width,(b.y-nb.y*width).clamp(rect.top(),rect.bottom()));
+        let inner_a=Pos2::new(a.x-na.x*width,(a.y-na.y*width).clamp(rect.top(),rect.bottom()));
+        mesh.colored_vertex(inner_b,Color32::TRANSPARENT);
+        mesh.colored_vertex(inner_a,Color32::TRANSPARENT);
+        mesh.add_triangle(base,base+1,base+2);
+        mesh.add_triangle(base,base+2,base+3);
     }
     mesh
 }
@@ -181,6 +241,29 @@ mod tests {
         assert!(!inside(&pts, Pos2::new(rect.left() - 0.5, 70.0)));
         // 底部圆角外侧是空的
         assert!(!inside(&pts, Pos2::new(rect.left() + 2.0, rect.bottom() - 2.0)));
+    }
+
+    #[test]
+    fn gradient_fill_runs_from_top_color_to_bottom_color() {
+        let rect=Rect::from_min_size(Pos2::ZERO,Vec2::new(419.0,140.0));
+        let mesh=fill_mesh_gradient(rect,17.6,16.0,33.0,Color32::WHITE,Color32::BLACK,1.0);
+        let top=mesh.vertices.iter().filter(|v|v.pos.y<14.0).map(|v|v.color.r()).max().unwrap();
+        let bottom=mesh.vertices.iter().filter(|v|v.pos.y>126.0).map(|v|v.color.r()).min().unwrap();
+        assert!(top>bottom,"顶部柔光必须向底部渐暗：{top} <= {bottom}");
+    }
+
+    #[test]
+    fn rim_band_stays_on_the_outline_and_fades_inward() {
+        let rect=Rect::from_min_size(Pos2::ZERO,Vec2::new(419.0,140.0));
+        let mesh=rim_mesh(rect,17.6,16.0,33.0,Color32::from_white_alpha(160),2.0,0.3);
+        assert!(!mesh.vertices.is_empty());
+        assert_eq!(mesh.vertices.len()%4,0);
+        assert!(mesh.vertices.iter().all(|v|v.pos.y>=rect.top()-0.01&&v.pos.y<=rect.bottom()+0.01));
+        assert!(mesh.vertices.iter().any(|v|v.color.a()>0),"rim 外沿应有颜色");
+        assert!(mesh.vertices.iter().any(|v|v.color.a()==0),"rim 内沿应淡出");
+        let top_alpha=mesh.vertices.iter().filter(|v|v.pos.y<8.0).map(|v|v.color.a()).max().unwrap_or(0);
+        let bottom_alpha=mesh.vertices.iter().filter(|v|v.pos.y>132.0).map(|v|v.color.a()).max().unwrap_or(255);
+        assert!(top_alpha>bottom_alpha,"底边 rim 应比顶边弱");
     }
 }
 

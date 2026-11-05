@@ -227,9 +227,10 @@ impl Window {
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放或屏幕连接变化后重新校正。
-    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds)->bool {
+    /// `work_top` 来自 `rcWork.top`，用于避开顶部任务栏。
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, work_top:i32)->bool {
         unsafe {
-            let Some((x,y))=crate::display_layout::island_origin(bounds,crate::app::WIN_W,scale) else{return false;};
+            let Some((x,y))=crate::display_layout::island_origin_at(bounds,work_top,crate::app::WIN_W,scale) else{return false;};
             let mut current=RECT::default();
             if GetWindowRect(self.hwnd,&mut current).is_err(){return false;}
             if (current.left,current.top)!=(x,y) && SetWindowPos(self.hwnd,None,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER).is_err(){return false;}
@@ -241,6 +242,41 @@ impl Window {
         let mut r=RECT::default();
         unsafe { GetWindowRect(self.hwnd,&mut r).ok()?; }
         Some(eframe::egui::pos2(r.left as f32/scale,r.top as f32/scale))
+    }
+
+    /// 采样岛体四周的桌面颜色（sRGB 0..1），给玻璃着色和文字对比度用。
+    /// 取窗口外的点，避免采到岛体自身；失败时由调用方回退到烟熏底色。
+    pub fn backdrop(&self)->Option<[f32;3]>{
+        use windows::Win32::Graphics::Gdi::{GetDC,GetPixel,ReleaseDC,CLR_INVALID};
+        unsafe{
+            let mut rect=RECT::default();
+            GetWindowRect(self.hwnd,&mut rect).ok()?;
+            let scale=(rect.right-rect.left) as f32/crate::app::CANVAS_W;
+            if !scale.is_finite()||scale<=0.0{return None;}
+            let island=(crate::app::WIN_W*scale).round() as i32;
+            if island<=0{return None;}
+            let mut points=vec![
+                (rect.left-24,rect.top+6),
+                (rect.left-24,rect.bottom+10),
+                (rect.left+island/2,rect.bottom+10),
+            ];
+            // 顶部任务栏时，岛体上方是任务栏而不是桌面。
+            if rect.top>10 {points.push((rect.left+island/2,rect.top-10));}
+            let dc=GetDC(HWND::default());
+            if dc.0.is_null(){return None;}
+            let mut sum=[0.0f32;3];let mut count=0.0f32;
+            for (x,y) in points{
+                let pixel=GetPixel(dc,x,y);
+                if pixel.0==CLR_INVALID{continue;}
+                let value=pixel.0;
+                sum[0]+=(value&0xff) as f32/255.0;
+                sum[1]+=((value>>8)&0xff) as f32/255.0;
+                sum[2]+=((value>>16)&0xff) as f32/255.0;
+                count+=1.0;
+            }
+            let _=ReleaseDC(HWND::default(),dc);
+            (count>0.0).then(||[sum[0]/count,sum[1]/count,sum[2]/count])
+        }
     }
 
     pub fn browser_at_top(&mut self,settings:&crate::model::Settings)->Option<bool> {

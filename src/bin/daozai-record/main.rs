@@ -448,6 +448,7 @@ fn main() {
             volume: Some((62, false)),
             bt: Vec::new(),
             bt_ready: true,
+            backdrop: Some([0.09, 0.11, 0.18]),
         };
 
         let mut vp = egui::ViewportInfo::default();
@@ -545,7 +546,7 @@ fn gallery() {
             if scene==16 {app.settings.minimal=true;}
             if scene==17 && frame==0 {app.receive_notification("聊天应用".into(),"whatsapp.preview".into(),"你好，下午见".into());}
             let idle=if scene==7{60.0}else if scene==8{200.0}else{0.0};
-            let env=Env{t,clock:"10:28:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),battery:Some(76),charging:true,cursor:if scene<6{Some(Pos2::new(320.0,60.0))}else{None},idle_seconds:Some(idle),..Default::default()};
+            let env=Env{t,clock:"10:28:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),battery:Some(76),charging:true,cursor:if scene<6{Some(Pos2::new(320.0,60.0))}else{None},idle_seconds:Some(idle),backdrop:Some([0.09,0.11,0.18]),..Default::default()};
             let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(640.0,190.0))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
             let output=ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(23,28,45))).show(ctx,|ui|{let win=ui.max_rect();app.frame(ui,win,&env);});});
             ras.update_textures(&output.textures_delta);

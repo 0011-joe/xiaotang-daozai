@@ -2286,12 +2286,120 @@ fn bluetooth_notices_track_multiple_devices_independently(){
 }
 
 #[test]
+fn fixed_island_disables_zoom_and_resets_any_zoom_each_frame(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    assert!(!h.ctx.options(|o|o.zoom_with_keyboard),"岛体不能启用键盘缩放");
+    h.ctx.set_zoom_factor(1.5);
+    h.frame(vec![]);
+    h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"Ctrl+滚轮/加号缩放必须在下一帧归位");
+}
+
+#[test]
+fn line_mode_ignores_hover_and_opens_on_click(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.island_mode=crate::model::IslandMode::Line;
+    h.app.open=false;
+    h.frame(vec![]);
+    let line=h.hit;
+    assert!(line.height()>=crate::app::LINE_HIT_H-0.01,"横线要有可点击的感应高度");
+    assert!(line.width()<=crate::app::BAR_W_MIN+0.01);
+    h.hover(line.center(),1.0);
+    assert!(!h.app.open,"横线模式不能因悬停展开");
+    h.click(line.center());
+    h.frame(vec![]);
+    assert!(h.app.open,"单击横线应展开");
+}
+
+#[test]
+fn hidden_mode_reports_no_region_or_hit(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.island_mode=crate::model::IslandMode::Hidden;
+    h.frame(vec![]);
+    assert_eq!((h.region.width(),h.region.height()),(0.0,0.0),"隐藏模式不能保留可见区域");
+    assert_eq!((h.hit.width(),h.hit.height()),(0.0,0.0),"隐藏模式不能保留命中区");
+}
+
+#[test]
+fn ui_scale_does_not_change_settings_zoom(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.ui_scale=150;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"岛体大小不能用全局 zoom 实现");
+    h.app.settings_open=true;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"设置打开时岛体大小不能改变设置窗口缩放");
+    h.app.settings.ui_scale=90;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"拖动岛体大小不能改设置窗口");
+    h.app.settings_open=false;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"关闭设置后全局 zoom 仍保持 1");
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_settings_window_and_island_returns_after_close(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings_open=true;h.app.settings.ui_scale=150;
+    h.frame(vec![]);h.frame(vec![]);
+    let raw=egui::RawInput{events:vec![egui::Event::Zoom(1.1)],..Default::default()};
+    let _=h.ctx.run(raw,|ctx|h.app.settings_ui(ctx,false));
+    assert!((h.app.settings_zoom-1.1).abs()<1e-3,"Ctrl+滚轮应调整设置窗口缩放");
+    h.app.settings_open=false;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"关闭设置后全局 zoom 回到 1");
+    assert!((h.app.settings_zoom-1.1).abs()<1e-3,"设置缩放保留给下次打开");
+}
+
+#[test]
+fn island_scale_uses_layout_scale_not_global_zoom(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.ui_scale=100;
+    h.frame(vec![]);h.frame(vec![]);
+    let base_hit=h.hit.width();
+    // 设置窗口打开时拖岛体大小：岛体必须立刻按比例变化，且不能占用全局 zoom。
+    h.app.settings_open=true;
+    h.app.settings.ui_scale=180;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.ctx.zoom_factor()-1.0).abs()<1e-3,"岛体大小不能占用全局 zoom");
+    let size=h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="09:41"=>Some(t.galley.job.sections[0].format.font_id.size),_=>None}).fold(0.0,f32::max);
+    assert!(size>20.0,"岛体文字应随 Card.s 放大：{size}");
+    assert!((h.hit.width()/base_hit-1.8).abs()<0.05,"设置打开时岛体命中区也必须立即放大：{} / {}",h.hit.width(),base_hit);
+    h.app.settings.ui_scale=90;
+    h.frame(vec![]);h.frame(vec![]);
+    assert!((h.hit.width()/base_hit-0.9).abs()<0.05,"设置打开时岛体缩小也要立即生效：{} / {}",h.hit.width(),base_hit);
+}
+
+#[test]
+fn music_title_and_artist_are_enlarged_in_the_text_area(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"在你的身边".into(),artist:"盛哲".into(),playing:true,position:1.0,duration:260.0,..Default::default()};
+    h.app.show_lyrics=true;
+    h.hover(H::local(280.0,15.0),1.0);
+    let size=|needle:&str|h.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text()==needle=>Some(text.galley.job.sections[0].format.font_id.size),_=>None}).fold(0.0,f32::max);
+    assert!(size("在你的身边")>=15.0,"曲名应放大到 15pt 左右");
+    assert!(size("盛哲")>=12.0,"歌手名应放大到 12pt 左右");
+}
+
+#[test]
+fn switching_from_calendar_keeps_the_island_open(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.open_calendar(None);h.hover(H::local(300.0,60.0),1.0);
+    assert_eq!(h.app.page,7);assert!(h.app.open);
+    assert_eq!(h.app.settings.page_order.last(),Some(&7),"日程应作为最后一项");
+    h.cursor=Some(H::local(150.0,180.0));h.frame(vec![]);
+    h.wheel(-40.0);
+    assert_eq!(h.app.page,0,"日程作为最后一项时应回绕到第一页");
+    assert!(h.app.open,"日历页变矮的过程中不能因为命中区缩短而收起");
+}
+
+#[test]
 fn display_choice_saves_and_keeps_disconnected_selection(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings_open=true;h.ctx.set_embed_viewports(false);
     let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
     h.app.displays=vec![
-        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,primary:true},
-        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,primary:false},
+        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,work_top:0,primary:true},
+        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,work_top:0,primary:false},
     ];
     let mut raster=crate::preview_raster::Raster::new(690,560);
     fn frame(h:&mut H,raster:&mut crate::preview_raster::Raster,events:Vec<egui::Event>){
@@ -2748,7 +2856,7 @@ fn calendar_island_collapses_and_reopens_on_the_same_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.open_calendar(None);h.hover(H::local(300.0,60.0),1.0);
     assert_eq!(h.app.page,7);assert!(h.app.open);
-    assert!(h.hit.bottom()>=crate::app::CALENDAR_H,"月历最后一行必须位于可操作区域内");
+    assert!(h.hit.bottom()>=crate::page_spec::SPECS[crate::page_spec::CALENDAR].height,"月历最后一行必须位于可操作区域内");
     h.hover(Pos2::new(600.0,WIN_H+30.0),5.0);assert!(!h.app.open);
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);assert!(h.app.open);
     assert_eq!(h.app.page,7);assert!(!h.app.settings_open);

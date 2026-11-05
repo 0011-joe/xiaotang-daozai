@@ -60,6 +60,8 @@ pub mod size {
     pub const BODY: f32 = 11.5; // 正文、按钮
     pub const SMALL: f32 = 11.0; // 说明
     pub const TINY: f32 = 10.0; // 脚注、坐标轴
+    /// 信息性文字的可读下限。再小在 4K、125%–150% 缩放下难以辨认。
+    pub const MIN: f32 = 9.0;
 }
 
 struct Face {

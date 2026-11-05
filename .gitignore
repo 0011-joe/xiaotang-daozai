@@ -1,5 +1,6 @@
 /target/
 /prebuilt/
+/.tools/
 /daozai.exe
 /dist/
 /design/

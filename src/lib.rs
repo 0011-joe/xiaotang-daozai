@@ -36,6 +36,7 @@ mod focus_bar;
 #[cfg(windows)]
 pub mod system;
 pub mod paint;
+mod page_spec;
 pub mod shape;
 pub mod smtc;
 pub mod theme;

@@ -223,8 +223,10 @@ pub(crate) fn is_browser_process(name:&str)->bool {
 }
 
 fn browser_overlaps_island(browser:RECT,island:RECT)->bool {
-    let scale=(island.right-island.left) as f32/crate::app::WIN_W;
-    let center=(island.left+island.right) as f32/2.0;
+    // `island` 是带右侧通知留白的整块透明画布：按 CANVAS_W 求缩放，
+    // 岛体只占左侧 WIN_W，中心也要按岛体而不是画布中心计算。
+    let scale=(island.right-island.left) as f32/crate::app::CANVAS_W;
+    let center=island.left as f32+crate::app::WIN_W as f32*scale/2.0;
     let half=crate::app::PW*scale/2.0;
     (browser.left as f32)<center+half && (browser.right as f32)>center-half
         && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top
@@ -443,6 +445,10 @@ mod tests {
         for browser in [RECT{left:100,top:150,right:1700,bottom:1100},RECT{left:1920,top:0,right:3840,bottom:1200},RECT{left:0,top:0,right:600,bottom:1000},RECT{left:0,top:-1200,right:1920,bottom:0}] {
             assert!(!browser_overlaps_island(browser,island));
         }
+        // 画布右侧 320 点是通知和阴影留白，不属于岛体：按整窗中心算会把这里误判成重叠。
+        let canvas=RECT{left:0,top:0,right:960,bottom:270};
+        assert!(!browser_overlaps_island(RECT{left:600,top:0,right:760,bottom:60},canvas),"岛体右侧留白不应触发避让");
+        assert!(browser_overlaps_island(RECT{left:400,top:0,right:500,bottom:60},canvas));
     }
     #[test]
     fn network_connection_uses_connected_wording() {

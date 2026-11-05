@@ -382,8 +382,8 @@ pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
 
 /// 电池环：充电绿色 + 闪电；低电量红色；否则灰色并显示百分比弧。
 pub fn battery(c: &Card, cx: f32, cy: f32, pct: Option<u8>, charging: bool, k: f32) {
-    let r = 8.2 * k;
-    let w = 2.6 * k;
+    let r = 9.0 * k;
+    let w = 2.8 * k;
     let level = pct.unwrap_or(100) as f32 / 100.0;
     let col = if charging {
         theme::CHARGE
@@ -403,8 +403,9 @@ pub fn battery(c: &Card, cx: f32, cy: f32, pct: Option<u8>, charging: bool, k: f
         let s = k;
         c.poly(&[(cx + 1.6 * s, cy - 5.0 * s), (cx - 3.2 * s, cy + 0.9 * s), (cx + 0.3 * s, cy + 0.9 * s)], col);
         c.poly(&[(cx - 0.3 * s, cy - 0.9 * s), (cx + 3.2 * s, cy - 0.9 * s), (cx - 1.6 * s, cy + 5.0 * s)], col);
-    } else {
-        c.text(cx, cy + 2.4 * k, &format!("{}", pct.unwrap_or(0)), 6.6 * k, W::Bold, col, H::Center);
+    } else if pct.is_some_and(|pct| pct < 100) {
+        // 三位数塞不进电池环；满电时用完整圆弧表达，避免缩成 6.6pt 的小字。
+        c.text(cx, cy + 2.6 * k, &format!("{}", pct.unwrap_or(0)), 8.4 * k, W::Bold, col, H::Center);
     }
 }
 

@@ -11,6 +11,8 @@ cargo build --locked --bin daozai
 cargo test --locked --all-targets --features record -- --test-threads=1
 ```
 
+`rc.exe` 用于把托盘图标和版本资源编进 exe。找不到时构建会退回内嵌 ICO（托盘仍可用，但 exe 没有版本资源）；可安装 Windows SDK，或把 SDK BuildTools 里的 `rc.exe` 与 `rcdll.dll` 放到 `.tools/rc/`，也可用 `RC` 环境变量指定 `rc.exe` 路径。`.tools/` 已被 gitignore。
+
 为开发实例指定独立目录，避免覆盖日常使用数据：
 
 ```powershell
@@ -26,6 +28,7 @@ cargo run --locked --bin daozai
 | --- | --- |
 | `src/main.rs` | Windows 外壳、系统状态和后台服务衔接 |
 | `src/app.rs`、`src/pages.rs` | 状态与主界面 |
+| `src/page_spec.rs` | 页面元数据（名称、设置页签、描述、展开高度）单一来源 |
 | `src/calendar.rs`、`src/calendar_ui.rs` | CalDAV、重复日程、月历与列表 |
 | `src/mail.rs`、`src/mail_reader.rs` | IMAP、MIME、验证码与邮件阅读 |
 | `src/quota*.rs` 及 provider 模块 | AI 额度与连接 |

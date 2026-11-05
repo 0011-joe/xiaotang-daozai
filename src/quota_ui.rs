@@ -10,13 +10,14 @@ pub(crate) struct State {
     pub provider:Provider,pub alias:String,pub source:String,pub note:String,
     pub login:Option<quota::grok::Login>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
+    pub doubao_connecting:Option<quota::doubao::Connect>,pub doubao_cookie:String,
 }
 impl State {
     pub fn load()->Self {Self{config:if cfg!(test){Config::default()}else{Config::load()},..Default::default()}}
     pub fn receive(&mut self,event:quota::Event){self.busy.remove(&event.id);if self.config.accounts.iter().any(|a|a.id==event.id && a.enabled){self.rows.insert(event.id,event.result);}}
 }
 fn accent_color(accent:Accent,provider:Provider)->Color32{
-    let accent=if accent==Accent::Brand{match provider{Provider::Codex=>Accent::Violet,Provider::Claude=>Accent::Orange,Provider::Kimi=>Accent::Blue,Provider::GrokBot=>Accent::Green,Provider::Gemini=>Accent::Cyan}}else{accent};
+    let accent=if accent==Accent::Brand{match provider{Provider::Codex=>Accent::Violet,Provider::Claude=>Accent::Orange,Provider::Kimi=>Accent::Blue,Provider::GrokBot=>Accent::Green,Provider::Gemini=>Accent::Cyan,Provider::Doubao=>Accent::Pink}}else{accent};
     let (r,g,b)=match accent{Accent::Brand|Accent::Violet=>(142,67,255),Accent::Orange=>(255,116,26),Accent::Blue=>(40,126,255),Accent::Cyan=>(0,213,242),Accent::Pink=>(255,43,132),Accent::Gold=>(255,190,0),Accent::Green=>(52,221,145)};
     Color32::from_rgb(r,g,b)
 }
@@ -54,7 +55,7 @@ pub(crate) fn bar_tooltip(response:egui::Response,text:String)->egui::Response{
 fn logo_texture(ctx:&egui::Context,provider:Provider,pixels:u32)->Option<egui::TextureHandle>{
     let key=egui::Id::new(("quota-logo",provider.name(),pixels));
     if let Some(texture)=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(key)){return Some(texture);}
-    let bytes:&[u8]=match provider{Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg")};
+    let bytes:&[u8]=match provider{Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg"),Provider::Doubao=>include_bytes!("../assets/ai-icons/doubao.svg")};
     let mut image=egui_extras::image::load_svg_bytes_with_size(bytes,Some(egui::load::SizeHint::Size(pixels,pixels))).ok()?;
     // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
     for pixel in &mut image.pixels{*pixel=Color32::from_white_alpha(pixel.a());}
@@ -106,6 +107,11 @@ impl App {
         if let Some(result)=result{
             self.quota.gemini_connecting=None;
             match result{Ok(connected)=>{let id=self.quota.config.connect_gemini(connected.slot,connected.label);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.config.save();self.quota.gemini_cookie.clear();self.quota.note="Gemini 已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
+        }
+        let result=self.quota.doubao_connecting.as_ref().and_then(|connect|connect.poll());
+        if let Some(result)=result{
+            self.quota.doubao_connecting=None;
+            match result{Ok(connected)=>{let id=self.quota.config.connect_doubao(connected.slot,connected.label);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.config.save();self.quota.doubao_cookie.clear();self.quota.note="豆包已连接".into();self.pending.push(Cmd::QuotaConnected);},Err(error)=>self.quota.note=error}
         }
         let result=self.quota.login.as_ref().and_then(|login|login.poll());
         if let Some(result)=result{
@@ -179,23 +185,24 @@ impl App {
             setting_row(ui,"AI 额度","每 3 分钟自动更新，可手动刷新",&mut self.quota.config.enabled);ui.separator();
             setting_row(ui,"收起时显示圆环","常驻账号最多显示 3 个，点击查看详情",&mut self.quota.config.compact);
         });
-        settings_label(ui,"账号");let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;
+        settings_label(ui,"账号");let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;let mut doubao_reconnect=None;
         settings_card(ui,|ui|{
             if self.quota.config.accounts.is_empty(){ui.label("还没有添加账号。可识别本机登录，或在下方连接其他账号。");}
             for a in &mut self.quota.config.accounts{ui.push_id(&a.id,|ui|{
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
+                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if a.provider==Provider::Doubao && ui.add_enabled(self.quota.doubao_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){doubao_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled((a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none()) && (a.provider!=Provider::Doubao || self.quota.doubao_connecting.is_none()),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
                 ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}});
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
-                let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else{a.source.to_string_lossy()};
+                let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::Doubao{"豆包网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else{a.source.to_string_lossy()};
                 ui.label(egui::RichText::new(source).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                 let message=if self.quota.busy.contains(&a.id){"正在更新…".into()}else{match self.quota.rows.get(&a.id){Some(Ok(s))=>format!("已更新 · {} 个额度周期",s.windows.len()),Some(Err(e))=>e.clone(),None=>"等待更新".into()}};ui.label(egui::RichText::new(message).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));ui.add_space(6.0);
             });}
             ui.horizontal(|ui|{if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}});
-            ui.label(egui::RichText::new("本机识别支持 Codex、Claude 桌面版与 Code、Kimi Code、Grok Bot；Gemini 请连接浏览器。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+            ui.label(egui::RichText::new("本机识别支持 Codex、Claude 桌面版与 Code、Kimi Code、Grok Bot；Gemini 与豆包请连接浏览器。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
         });
-        if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
+        if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),Provider::Doubao=>quota::doubao::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
         if let Some(alias)=reconnect{self.quota_login(alias);}
         if let Some((alias,slot))=gemini_reconnect{self.quota.gemini_connecting=Some(quota::gemini::Connect::start(alias,String::new(),None,slot));}
+        if let Some((alias,slot))=doubao_reconnect{self.quota.doubao_connecting=Some(quota::doubao::Connect::start(alias,None,slot));}
         settings_label(ui,"添加其他账号");settings_card(ui,|ui|{
             settings_control_row(ui,"服务",56.0,|ui|{egui::ComboBox::from_id_salt("quota-provider").selected_text(self.quota.provider.name()).show_ui(ui,|ui|{for p in Provider::ALL{ui.selectable_value(&mut self.quota.provider,p,p.name());}}).response});
             settings_control_row(ui,"备注",56.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.alias).vertical_align(egui::Align::Center).hint_text("例如：个人、工作、备用"))});
@@ -208,6 +215,15 @@ impl App {
                     ui.label("在 Gemini 用量页按 F12，打开网络，刷新后找到 executeQuery 请求，复制 Cookie 请求头。");
                     ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.gemini_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头"));
                     if ui.add_enabled(self.quota.gemini_connecting.is_none() && !self.quota.gemini_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){self.quota.gemini_connecting=Some(quota::gemini::Connect::start(self.quota.alias.clone(),self.quota.gemini_email.clone(),Some(self.quota.gemini_cookie.clone()),None));}
+                });
+            }else if self.quota.provider==Provider::Doubao{
+                ui.label(egui::RichText::new("读取豆包网页的 5 小时与每周额度。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                ui.horizontal(|ui|{if ui.button("打开豆包").clicked(){self.pending.push(Cmd::OpenUrl("https://www.doubao.com/chat/".into()));}if ui.add_enabled(self.quota.doubao_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){self.quota.doubao_connecting=Some(quota::doubao::Connect::start(self.quota.alias.clone(),None,None));}});
+                ui.label(egui::RichText::new("浏览器连接需要 Kimi 浏览器扩展；登录态用 Windows DPAPI 加密保存。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                ui.collapsing("使用 Cookie 连接",|ui|{
+                    ui.label("在豆包网页按 F12，打开网络，复制任一请求的 Cookie 请求头（需包含 sessionid）。");
+                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.doubao_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头"));
+                    if ui.add_enabled(self.quota.doubao_connecting.is_none() && !self.quota.doubao_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){self.quota.doubao_connecting=Some(quota::doubao::Connect::start(self.quota.alias.clone(),Some(self.quota.doubao_cookie.clone()),None));}
                 });
             }else if self.quota.provider==Provider::GrokBot{
                 ui.horizontal(|ui|{
@@ -223,6 +239,7 @@ impl App {
         });
         if self.quota.login.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("等待浏览器登录…");if ui.button("取消登录").clicked(){self.quota.login=None;self.quota.note="登录已取消".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
         if self.quota.gemini_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在连接 Gemini…");});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
+        if self.quota.doubao_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("正在连接豆包…");});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
         if !self.quota.note.is_empty(){ui.label(egui::RichText::new(&self.quota.note).size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(190),Color32::from_gray(65))));}
         if before!=self.quota.config{self.quota.config.save();}
     }

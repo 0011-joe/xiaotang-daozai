@@ -12,6 +12,7 @@ use crate::lyrics;
 use crate::mail;
 use crate::model;
 use crate::paint::{self, Card, H};
+use crate::page_spec::{self, SPECS};
 use crate::shape;
 use crate::smtc::{NowPlaying, Transport};
 use crate::theme::{self, size, W};
@@ -21,9 +22,8 @@ use std::path::PathBuf;
 
 // ---------- 几何（逻辑点；原版 125% 截图 ÷ 1.25） ----------
 pub const PW: f32 = 419.0; // 展开面板宽
-pub const PH: f32 = 140.0; // 展开面板高
-pub(crate) const CALENDAR_PAGE: usize = 7;
-pub(crate) const CALENDAR_H: f32 = 216.0;
+pub const PH: f32 = page_spec::PANEL_H; // 展开面板高
+pub(crate) const CALENDAR_PAGE: usize = page_spec::CALENDAR;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -32,13 +32,14 @@ pub(crate) const HUD_TRACK_X: f32 = 48.0;
 pub(crate) const HUD_TRACK_W: f32 = 150.0;
 pub const BAR_W_MIN: f32 = 44.0; // 极简小条
 pub const BAR_H_MIN: f32 = 4.5;
+pub const LINE_H: f32 = 2.0; // 横线模式的可见高度
+pub const LINE_HIT_H: f32 = 8.0; // 横线模式的点击感应高度
 pub const FLARE: f32 = 17.6; // 顶部外翻肩宽
 pub const FLARE_H: f32 = 16.0; // 外翻收敛高度
 pub const RAD: f32 = 33.0; // 底部圆角
 pub const WIN_W: f32 = 640.0; // 窗口（透明画布）
 pub const CANVAS_W: f32 = WIN_W + 320.0; // 保留右侧通知及阴影的完整空间，原岛仍按 WIN_W 定位。
 pub const WIN_H: f32 = 270.0;
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -94,6 +95,8 @@ pub struct Env {
     pub bt: Vec<crate::bt::Device>,
     /// 蓝牙服务是否已经完成首次扫描。
     pub bt_ready: bool,
+    /// 岛体周围屏幕颜色的采样（sRGB 0..1），用于玻璃着色和文字对比度。
+    pub backdrop: Option<[f32; 3]>,
 }
 
 impl Env {
@@ -367,6 +370,10 @@ pub struct App {
 
     forced_open_until:f64,
     pub settings_open:bool,
+    /// 设置窗口的独立缩放；Ctrl+加号/滚轮修改，不受岛体大小影响。
+    pub(crate) settings_zoom:f32,
+    pub(crate) settings_window_zoom:f32,
+    was_settings_open:bool,
     pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
     browser_minimal_active:bool,
@@ -429,6 +436,8 @@ impl App {
         egui_extras::install_image_loaders(ctx);
         ctx.set_theme(egui::ThemePreference::Dark);
         ctx.set_visuals(egui::Visuals::dark());
+        // 岛体是固定尺寸的原生窗口；任何缩放都会把右侧和底部裁掉，所以不提供 UI 缩放。
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
         ctx.style_mut(|s| {
             s.interaction.selectable_labels = false;
             s.visuals.text_cursor.stroke = egui::Stroke::new(1.5_f32, theme::BLUE);
@@ -491,7 +500,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_zoom:1.0, settings_window_zoom:1.0, was_settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, settings_focus_requested:false, settings_tab:0, settings_category:0, notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, pet: Default::default(), last_drink: None,
@@ -936,7 +945,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=SPECS[page].settings_tab;
             self.open_settings();
             return;
         }
@@ -972,8 +981,8 @@ impl App {
 
     fn navigate_page(&mut self,next:bool) {
         let position=self.settings.page_order.iter().position(|page|*page==self.page).unwrap();
-        for offset in 1..=PAGE_NAMES.len() {
-            let page=self.settings.page_order[(position+if next {offset}else{PAGE_NAMES.len()-offset})%PAGE_NAMES.len()];
+        for offset in 1..=page_spec::COUNT {
+            let page=self.settings.page_order[(position+if next {offset}else{page_spec::COUNT-offset})%page_spec::COUNT];
             if self.settings.visible_pages[page] {
                 self.go(page,if next {1.0}else{-1.0});
                 break;
@@ -1026,7 +1035,7 @@ impl App {
     }
 
     fn island_lyrics_active(&self)->bool {
-        self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
+        self.settings.island_mode == model::IslandMode::Normal && self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
             && !self.browser_minimal_active
             && self.ly.key==format!("{}|{}|{:.0}",self.media.title,self.media.artist,self.media.duration)
             && self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced && lyrics.lines.iter().any(|line|!line.text.trim().is_empty()))
@@ -1056,8 +1065,10 @@ impl App {
                 else {"间奏"}
             } else {""};
         let ink=if current.is_some(){theme::WHITE}else{theme::GRAY};
+        let visual=self.settings.scale()/ctx.zoom_factor().max(0.1);
+        let lyric_width=(LYRIC_BAR_W-28.0).max(120.0);
         let layout=|text:String| {
-            let mut job=egui::text::LayoutJob::simple(text,theme::font(11.0,W::Semibold),ink,LYRIC_BAR_W-80.0);
+            let mut job=egui::text::LayoutJob::simple(text,theme::font(13.5*visual,W::Semibold),ink,lyric_width*visual-8.0);
             job.halign=egui::Align::Center;
             job.wrap.break_anywhere=true;
             ctx.fonts(|fonts|fonts.layout_job(job))
@@ -1078,7 +1089,7 @@ impl App {
         self.island_lyric_layout=Some(galley);
     }
 
-    fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active}
+    fn effective_minimal(&self)->bool {self.settings.minimal || self.browser_minimal_active || self.settings.island_mode==model::IslandMode::Line}
     pub(crate) fn pet_enabled(&self)->bool {self.settings.pet && !self.effective_minimal()}
     pub(crate) fn pet_space(&self)->f32 {if self.pet_enabled(){44.0}else{0.0}}
     fn lyric_focus_space(&self)->f32 {if self.pomo.running{crate::focus_bar::LYRIC_WIDTH+10.0}else{0.0}}
@@ -1099,6 +1110,8 @@ impl App {
         }
         if self.island_lyrics_active() {
             (self.lyric_bar_width(),BAR_H)
+        } else if self.settings.island_mode==model::IslandMode::Line && self.t>=self.notification_bell_until {
+            (BAR_W_MIN, LINE_H)
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
             (BAR_W_MIN, BAR_H_MIN)
         } else {
@@ -1116,7 +1129,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==page_spec::MAIL && self.mail.open_uid.is_some() { 236.0 } else { SPECS[self.page].height }
     }
 
     // ---------------------------------------------------------------
@@ -1124,6 +1137,41 @@ impl App {
     // ---------------------------------------------------------------
     pub fn frame(&mut self, ui: &mut egui::Ui, win: Rect, env: &Env) -> FrameOut {
         let ctx = ui.ctx().clone();
+        // 设置窗口使用独立的 settings_zoom；岛体不再使用全局 zoom，
+        // 而是在绘制层用 Card.s 缩放，所以两者互不影响。
+        if self.settings_open {
+            if !self.was_settings_open {
+                ctx.options_mut(|o| o.zoom_with_keyboard = true);
+                self.settings_zoom = self.settings_zoom.clamp(0.8, 2.0);
+                if (ctx.zoom_factor() - self.settings_zoom).abs() > 1e-3 { ctx.set_zoom_factor(self.settings_zoom); }
+            } else {
+                self.settings_zoom = ctx.zoom_factor().clamp(0.8, 2.0);
+            }
+            self.was_settings_open = true;
+        } else {
+            self.was_settings_open = false;
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
+            if (ctx.zoom_factor() - 1.0).abs() > 1e-3 { ctx.set_zoom_factor(1.0); }
+        }
+        if self.settings.island_mode == model::IslandMode::Hidden {
+            // 完全隐藏：保留事件循环（托盘仍可打开设置），但不绘制也不接收点击。
+            self.last_t = Some(env.t);
+            self.t = env.t;
+            self.current_hour=env.hour();
+            self.system_idle=env.idle_seconds;
+            self.quota_tick();
+            return FrameOut {
+                region: Rect::from_min_size(Pos2::ZERO, Vec2::ZERO),
+                hit: Rect::from_min_size(Pos2::ZERO, Vec2::ZERO),
+                notice_hit: None,
+                file_drop_zone: None,
+                expanded: false,
+                editing: false,
+                animating: false,
+                repaint_after: std::time::Duration::from_secs(1),
+                cmds: std::mem::take(&mut self.pending),
+            };
+        }
         let dt = match self.last_t {
             Some(t0) => (env.t - t0).clamp(0.0, 0.1) as f32,
             None => 0.0,
@@ -1213,6 +1261,10 @@ impl App {
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
         let inside = env.cursor.is_some_and(|c| hit.contains(c));
+        // 横线模式不响应悬停，只在点击时展开，避免误触。
+        let line_collapsed = self.settings.island_mode == model::IslandMode::Line && !self.open;
+        let line_click = line_collapsed && inside && ctx.input(|i| i.pointer.primary_clicked());
+        if line_click { self.forced_open_until = self.t + 4.0; }
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
@@ -1270,38 +1322,63 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
-        self.morph(want, inside, env.t, dt);
+        let hover_inside = if line_collapsed { false } else { inside };
+        let want = (hover_inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || line_click || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        self.morph(want, hover_inside, env.t, dt, line_click);
         self.update_pet(env, cx);
 
         // ---------- 绘制 ----------
         let p = self.progress();
         let (w, h) = (self.w.pos, self.h.pos);
+        let scale = self.settings.scale() / ctx.zoom_factor().max(0.1);
         let panel = Rect::from_min_size(Pos2::new(cx - w / 2.0, top), Vec2::new(w, h));
+        let cx_s = cx * scale;
+        let sr = |r: Rect| Rect::from_min_max((r.min.to_vec2()*scale).to_pos2(),(r.max.to_vec2()*scale).to_pos2());
+        let panel_s = Rect::from_min_size(Pos2::new(cx_s - w * scale / 2.0, top), Vec2::new(w * scale, h * scale));
         let pc = anim::clamp01(p);
         let painter = ui.painter_at(ui.max_rect().expand(40.0));
         let feather = 1.0 / ctx.pixels_per_point();
         let minimal_pill = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
+        let line_pill = minimal_pill && self.settings.island_mode == model::IslandMode::Line;
         let flare = if minimal_pill { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / PW).clamp(0.3, 1.1);
-        let radius = if minimal_pill { BAR_H_MIN / 2.0 } else { lerp(12.5, RAD * k.min(1.0), pc) };
+        let radius = if line_pill { LINE_H / 2.0 } else if minimal_pill { BAR_H_MIN / 2.0 } else { lerp(12.5, RAD * k.min(1.0), pc) };
         let flare_h = lerp(8.0, FLARE_H, pc);
-        let thick = glass::thickness(PH);
-        let shadow_k = glass::shadow_alpha(0.0, thick) / 0.12;
-        shape::shadow(&painter, panel, flare, flare_h, radius, smoothstep(0.1, 0.9, pc) * shadow_k);
+        let material = glass::material(h, env.backdrop, smoothstep(0.1, 0.9, pc) * 0.04);
+        let solid_black = self.settings.solid_black;
+        let shadow_k = material.shadow / 0.12;
+        shape::shadow(&painter, panel_s, flare * scale, flare_h * scale, radius * scale, smoothstep(0.1, 0.9, pc) * shadow_k * if line_pill {0.3} else {1.0});
         let notice_rect=self.notice_rect(cx,top);
         let notice_shape=notice_rect.map(|r|Rect::from_min_max(Pos2::new(r.left()-36.0,r.top()),r.max));
-        if let Some(r)=notice_shape {shape::shadow(&painter,r,5.0,8.0,12.5,0.5*shadow_k);}
-        shape::fill(&painter, panel, flare, flare_h, radius, Color32::BLACK, feather);
-        if let Some(r)=notice_shape {shape::fill(&painter,r,5.0,8.0,12.5,Color32::BLACK,feather);}
+        let notice_shape_s=notice_shape.map(|r|Rect::from_min_max((r.min.to_vec2()*scale).to_pos2(),(r.max.to_vec2()*scale).to_pos2()));
+        if let Some(r)=notice_shape_s {shape::shadow(&painter,r,5.0*scale,8.0*scale,12.5*scale,0.5*shadow_k);}
+        // 玻璃面板：底色渐变 + 霜边 + 内发光 + 边缘高光。极细的小条只填底色。
+        let paint_glass = |rect: Rect, flare: f32, flare_h: f32, radius: f32, minimal: bool, m: &glass::Material| {
+            if solid_black {
+                shape::fill(&painter, rect, flare, flare_h, radius, Color32::BLACK, feather);
+                return;
+            }
+            if minimal {
+                shape::fill(&painter, rect, flare, flare_h, radius, glass::ground_color(m), feather);
+                return;
+            }
+            shape::fill_gradient(&painter, rect, flare, flare_h, radius, glass::sheen_color(m), glass::ground_color(m), feather);
+            shape::rim(&painter, rect, flare, flare_h, radius, glass::frost_color(m), m.frost_hi * scale, glass::RIM_FACING_MIN);
+            shape::rim(&painter, rect, flare, flare_h, radius, glass::glow_color(m), m.frost_lo * scale, glass::RIM_FACING_MIN);
+            shape::rim(&painter, rect, flare, flare_h, radius, glass::rim_color(m, 1.0), 1.0 * scale, glass::RIM_FACING_MIN);
+        };
+        paint_glass(panel_s, flare * scale, flare_h * scale, radius * scale, minimal_pill, &material);
+        if let Some(r)=notice_shape_s {paint_glass(r,5.0*scale,8.0*scale,12.5*scale,false,&glass::material((r.height()/scale).max(1.0),env.backdrop,0.0));}
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
         let reveal = if self.open { smoothstep(0.50, 0.97, p) } else { smoothstep(0.55, 0.92, p) };
         self.reveal = reveal;
         let origin = Pos2::new(cx - PW / 2.0, top);
-        let clip = panel.intersect(win);
-        let base = Card::new(ui, origin, clip);
-        self.cursor_local = env.cursor.map(|p| base.to_local(p));
+        let origin_s = Pos2::new(cx_s - PW * scale / 2.0, top);
+        let clip_s = panel_s.intersect(Rect::from_min_size(win.min, win.size()*scale));
+        let mut base = Card::new(ui, origin_s, clip_s);
+        base.s = scale;
+        self.cursor_local = env.cursor.map(|p| p - origin.to_vec2());
 
         let banner=!self.compact_notices()&&self.notice.is_some()&&!self.open;
         let restoring_lyrics=!self.open&&self.notice.is_none()&&self.island_lyrics_active()&&self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()||matches!(a.source,crate::extras::AlertSource::External(_)));
@@ -1311,19 +1388,21 @@ impl App {
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
             let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
                 else {(self.hud_alpha*smoothstep(0.20,0.60,width_progress),1.0-smoothstep(0.05,0.25,width_progress))};
-            if !minimal_pill||pc>0.0 {self.shared_header(&base.faded(header_opacity),cx,pc,reveal,env);}
+            if !minimal_pill||pc>0.0 {self.shared_header(&base.faded(header_opacity),origin_s.x+PW/2.0,pc,reveal,env);}
             if let Some(a)=self.hud_notice.clone(){
-                let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())).faded(opacity);
+                let mut overlay=Card::new(ui,panel_s.min+Vec2::new(self.pet_space()*scale,0.0),panel_s.intersect(ui.max_rect()));overlay.s=scale;
+                let overlay=overlay.faded(opacity);
                 let overlay=if opacity<0.85||!banner{overlay.ghost()}else{overlay};
                 self.draw_notice(&overlay,panel,&a,&mut cmds);
             }
         }else if banner {
-            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
+            if let Some(a)=self.notice.clone(){let mut c=Card::new(ui,panel_s.min+Vec2::new(self.pet_space()*scale,0.0),panel_s.intersect(ui.max_rect()));c.s=scale;self.draw_notice(&c,panel,&a,&mut cmds);}
         }else if !minimal_pill || pc > 0.0 {
-            self.shared_header(&base, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
+            self.shared_header(&base, origin_s.x+PW/2.0, if restoring_lyrics{0.0}else{pc}, reveal, env);
         }
         if let Some(rect)=notice_rect {
-            let c=Card::new(ui,rect.min,rect.intersect(ui.max_rect()));
+            let rect_s=sr(rect);
+            let mut c=Card::new(ui,rect_s.min,rect_s.intersect(ui.max_rect()));c.s=scale;
             if let Some(a)=self.hud_notice.clone() {
                 let opacity=self.hud_alpha*smoothstep(0.45,0.95,self.notice_width.pos/44.0);
                 let c=c.faded(opacity);let c=if self.notice.is_none()||opacity<0.85 {c.ghost()}else{c};
@@ -1341,11 +1420,13 @@ impl App {
         }
         let notice_details=self.notice_details_rect(cx,top);
         if let Some(rect)=notice_details {
+            let rect_s=sr(rect);
             let radius=if self.hud_notice.as_ref().is_some_and(|a|a.meeting.is_some()){14.0}else{10.0};
-            shape::shadow(&painter,rect,0.0,0.0,radius,0.5*shadow_k);
-            painter.rect_filled(rect,radius,Color32::BLACK);
-            self.draw_notice(&Card::new(ui,rect.min,rect.intersect(ui.max_rect())),rect,&self.hud_notice.clone().unwrap(),&mut cmds);
-            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect.contains(p)&&!notice_rect.is_some_and(|r|r.contains(p)))){self.notice_details=false;}
+            shape::shadow(&painter,rect_s,0.0,0.0,radius*scale,0.5*shadow_k);
+            paint_glass(rect_s,0.0,0.0,radius*scale,false,&glass::material(rect.height(),env.backdrop,0.0));
+            let mut c=Card::new(ui,rect_s.min,rect_s.intersect(ui.max_rect()));c.s=scale;
+            self.draw_notice(&c,rect,&self.hud_notice.clone().unwrap(),&mut cmds);
+            if ctx.input(|i|i.pointer.any_pressed()&&i.pointer.interact_pos().is_some_and(|p|!rect_s.contains(p)&&!notice_rect.is_some_and(|r|!sr(r).contains(p)))){self.notice_details=false;}
         }
         let pet_alpha=self.pet_a*(1.0-smoothstep(0.0,0.3,pc));
         if pet_alpha>0.004 && !minimal_pill {
@@ -1360,7 +1441,8 @@ impl App {
         }
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
         let floating_toast=if self.toast_below && self.toast.is_some() {
-            self.toast_layer(&Card::new(ui,origin,win),h+8.0)
+            let mut c=Card::new(ui,origin_s,Rect::from_min_size(win.min,win.size()*scale));c.s=scale;
+            self.toast_layer(&c,h+8.0)
         }else{None};
         if (self.adding||self.editing.is_some()) && reveal > 0.9 && self.page == 4 && self.page_e() > 0.25 {
             self.input_field(ui, origin, &mut cmds);
@@ -1372,14 +1454,14 @@ impl App {
         // ---------- 输出 ----------
         let rel = |r: Rect| r.translate(-win.min.to_vec2());
         let mut region = if p > 0.02 || self.open {
-            let height=self.expanded_height().max(self.h.pos)*1.08+16.0;
-            Rect::from_center_size(Pos2::new(cx, top + height/2.0), Vec2::new(PW + FLARE * 2.0 + 56.0, height))
+            let height=(self.expanded_height().max(self.h.pos)*1.08+16.0)*scale;
+            Rect::from_center_size(Pos2::new(cx_s, top + height/2.0), Vec2::new((PW + FLARE * 2.0 + 56.0)*scale, height))
         } else {
             let (bw, bh) = self.base_size();
-            Rect::from_center_size(Pos2::new(cx, top + (bh * SWELL.1 + 12.0) / 2.0), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0))
+            Rect::from_center_size(Pos2::new(cx_s, top + (bh * SWELL.1 + 12.0)*scale / 2.0), Vec2::new((bw * SWELL.0 + 24.0)*scale, (bh * SWELL.1 + 12.0)*scale))
         };
-        if let Some(rect)=notice_shape {region=region.union(rect.expand2(Vec2::new(12.0,8.0)));}
-        if let Some(rect)=notice_details {region=region.union(rect.expand(12.0));}
+        if let Some(rect)=notice_shape_s {region=region.union(rect.expand2(Vec2::new(12.0,8.0)*scale));}
+        if let Some(rect)=notice_details {region=region.union(sr(rect).expand(12.0*scale));}
         // 原生裁剪还需包含悬停提示；只扩大绘制区域，保持桌面点击穿透。
         ctx.memory(|memory|{
             for layer in memory.areas().visible_layer_ids() {
@@ -1415,9 +1497,9 @@ impl App {
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.map_or(region,|toast|region.union(toast)).intersect(ui.max_rect())),
-            hit: rel(self.hit_rect(cx, top, self.progress())),
-            notice_hit:notice_shape.map(|r|rel(notice_details.map_or(r,|details|r.union(details)))),
-            file_drop_zone:self.settings.visible_pages[3].then(||rel(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0)))),
+            hit: rel(sr(self.hit_rect(cx, top, self.progress()))),
+            notice_hit:notice_shape_s.map(|r|rel(notice_details.map_or(r,|details|r.union(sr(details))))),
+            file_drop_zone:self.settings.visible_pages[3].then(||rel(sr(Rect::from_min_size(Pos2::new(cx-PW/2.0,top),Vec2::new(PW,96.0))))),
             expanded: self.open,
             editing: self.is_editing(),
             animating,
@@ -1430,12 +1512,13 @@ impl App {
         if self.effective_minimal() && !self.open {
             let (width,height)=self.base_size();
             let width=self.w.pos.min(width);
-            let height=self.h.pos.min(height);
+            let mut height=self.h.pos.min(height);
+            if self.settings.island_mode==model::IslandMode::Line { height=height.max(LINE_HIT_H); }
             Rect::from_min_size(Pos2::new(cx-width/2.0,top),Vec2::new(width,height))
         } else if self.notice.is_some()&&!self.compact_notices()&&!self.open {
             let (w,h)=self.base_size();Rect::from_min_size(Pos2::new(cx-(w+8.0)/2.0,top),Vec2::new(w+8.0,h+6.0))
         } else if p > 0.04 || self.open {
-            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height() + 2.0))
+            Rect::from_min_size(Pos2::new(cx - PW / 2.0 - 4.0, top), Vec2::new(PW + 8.0, self.expanded_height().max(self.h.pos) + 2.0))
         } else {
             let (bw,bh)=self.base_size();
             let (hit_w,hit_h)=(bw+12.0,bh+4.0);
@@ -1455,13 +1538,13 @@ impl App {
     }
 
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
-    fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32) {
+    fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32, immediate: bool) {
         let (bw, bh) = self.base_size();
         if want {
             self.leave_since = None;
             let since = *self.hover_since.get_or_insert(t);
             let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
-            if !self.open && (self.drag_hot || t - since >= intent) {
+            if !self.open && (immediate || self.drag_hot || t - since >= intent) {
                 self.open = true;
                 self.w.tune(OPEN_W.0, OPEN_W.1);
                 self.h.tune(OPEN_H.0, OPEN_H.1);
@@ -1637,11 +1720,11 @@ impl App {
     // 面板主体：页标题 + 页面（带切页过渡）+ 翻页箭头 + 页码豆
     // ---------------------------------------------------------------
     fn panel_body(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
-        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",PAGE_NAMES[self.page]));
+        let settings=c.hit(380.0,4.0,28.0,28.0,"page-settings").on_hover_text(format!("打开{}设置窗口",SPECS[self.page].name));
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=SPECS[self.page].settings_tab;self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -1674,16 +1757,7 @@ impl App {
 
     fn page_title(&self, page: usize, c: &Card) {
         let base = 25.0;
-        let (a, b, col) = match page {
-            0 | CALENDAR_PAGE => return,
-            1 => ("番茄", "专注", theme::RED_TOP),
-            2 => ("饮水", "提醒", theme::BLUE),
-            3 => ("置物架", "", theme::WHITE),
-            4 => ("待办", "清单", theme::GREEN),
-            5 => ("邮箱", "", theme::CYAN),
-            6 => ("AI", "额度", theme::SOFT_GREEN),
-            _ => ("岛仔", "设置", theme::WHITE),
-        };
+        let Some((a, b, col)) = SPECS[page].title else { return };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
         if !b.is_empty() {
             c.text(15.0 + wa + 1.5, base, b, size::TITLE, W::Bold, col, H::Left);
@@ -1713,7 +1787,7 @@ impl App {
             let col = paint::mix(Color32::from_rgb(92, 92, 96), theme::WHITE, on);
             c.fill(x, dot_y - 2.0, w, 4.0, 2.0, col);
             let hr = c.hit(x - 2.0, dot_y - 6.0, w + 4.0, 12.0, ("dot", i));
-            hr.clone().on_hover_text(PAGE_NAMES[i]);
+            hr.clone().on_hover_text(SPECS[i].name);
             if hr.hovered() && i != self.page {
                 c.fill(x - 1.0, dot_y - 3.0, w + 2.0, 6.0, 3.0, Color32::from_white_alpha(28));
             }
@@ -1731,14 +1805,14 @@ impl App {
 
     fn render_page(&mut self, page: usize, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         match page {
-            0 => self.page_music(c, env, cmds),
-            1 => self.page_focus(c, env),
-            2 => self.page_water(c, env),
-            3 => self.page_shelf(c, env, cmds),
-            4 => self.page_todo(c, env, cmds),
-            5 => self.page_mail(c, env, cmds),
-            6 => self.page_quota(c),
-            CALENDAR_PAGE => self.page_calendar(c,env),
+            page_spec::MUSIC => self.page_music(c, env, cmds),
+            page_spec::FOCUS => self.page_focus(c, env),
+            page_spec::WATER => self.page_water(c, env),
+            page_spec::SHELF => self.page_shelf(c, env, cmds),
+            page_spec::TODO => self.page_todo(c, env, cmds),
+            page_spec::MAIL => self.page_mail(c, env, cmds),
+            page_spec::QUOTA => self.page_quota(c),
+            page_spec::CALENDAR => self.page_calendar(c,env),
             _ => self.page_settings(c),
         }
     }
@@ -1990,15 +2064,16 @@ impl App {
 
     /// 待办输入框：真正的 egui 文本框，放在待办卡片顶部那一行。
     fn input_field(&mut self, ui: &mut egui::Ui, origin: Pos2, cmds: &mut Vec<Cmd>) {
-        let rect = Rect::from_min_size(origin + Vec2::new(222.0, 37.0), Vec2::new(142.0, 18.0));
+        let s=self.settings.scale()/ui.ctx().zoom_factor().max(0.1);
+        let rect = Rect::from_min_size(origin + Vec2::new(222.0*s, 37.0*s), Vec2::new(142.0*s, 18.0*s));
         let mut buf = std::mem::take(&mut self.buf);
         let te = egui::TextEdit::singleline(&mut buf)
             .id(egui::Id::new("todo-input"))
             .frame(false)
             .margin(egui::Margin::ZERO)
             .text_color(theme::WHITE)
-            .font(theme::font(size::BODY, W::Regular))
-            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY, W::Regular)))
+            .font(theme::font(size::BODY*s, W::Regular))
+            .hint_text(egui::RichText::new("要做点什么？回车保存").color(theme::DIM).font(theme::font(size::BODY*s, W::Regular)))
             .desired_width(rect.width());
         let resp = ui.put(rect, te);
         let first_focus=!self.todo_input_focused;

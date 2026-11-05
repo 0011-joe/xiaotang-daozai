@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -83,9 +83,35 @@ fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
     result
 }
 
+/// 岛体显示方式：正常、收起为横线、完全隐藏。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IslandMode {
+    #[default]
+    Normal,
+    Line,
+    Hidden,
+}
+impl IslandMode {
+    pub const ALL: [Self; 3] = [Self::Normal, Self::Line, Self::Hidden];
+    pub fn key(self) -> &'static str {
+        match self { Self::Normal => "normal", Self::Line => "line", Self::Hidden => "hidden" }
+    }
+    pub fn label(self) -> &'static str {
+        match self { Self::Normal => "正常", Self::Line => "横线", Self::Hidden => "隐藏" }
+    }
+    fn parse(value: &str) -> Self {
+        Self::ALL.into_iter().find(|mode| mode.key().eq_ignore_ascii_case(value)).unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub display_id: String,
+    pub island_mode: IslandMode,
+    /// 界面缩放百分比，100–180；岛体和原生窗口一起缩放。
+    pub ui_scale: u16,
+    /// 保留纯黑底色，关闭玻璃半透明和边缘光。
+    pub solid_black: bool,
     pub settings_theme: crate::settings_theme::SettingsTheme,
     pub pet: bool,
     pub minimal: bool,
@@ -127,13 +153,18 @@ pub struct Settings {
     pub calendar_auto_sync: bool,
 }
 
+/// `settings.txt` 的格式版本。读取端逐字段取默认值，旧文件没有该键也能读。
+pub const SETTINGS_VERSION: u32 = 3;
+
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), island_mode: IslandMode::Normal, ui_scale: 100, solid_black: false, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
 impl Settings {
+    pub fn scale(&self) -> f32 { self.ui_scale as f32 / 100.0 }
+
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
         let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
@@ -148,11 +179,18 @@ impl Settings {
     }
 
     pub fn load() -> Self {
+        Self::load_from(&config_dir().join("settings.txt"))
+    }
+
+    fn load_from(path: &Path) -> Self {
         let mut s = Self::default();
-        for (k, v) in read_kv(&config_dir().join("settings.txt")) {
+        for (k, v) in read_kv(path) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
                 "display_id" => s.display_id = v,
+                "island_mode" => s.island_mode = IslandMode::parse(&v),
+                "ui_scale" => s.ui_scale = v.parse::<u16>().unwrap_or(100).clamp(90,180),
+                "solid_black" => s.solid_black = v != "0",
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
                 "browser_minimal" => s.browser_minimal = v == "1",
@@ -208,48 +246,69 @@ impl Settings {
     }
 
     pub fn save(&self) {
-        let _ = write_kv(
-            &config_dir().join("settings.txt"),
-            &[
-                ("display_id".into(),self.display_id.clone()),
-                ("settings_theme".into(),self.settings_theme.key().into()),
-                ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
-                ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
-                ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
-                ("avoid_browsers".into(), (self.avoid_browsers as u8).to_string()),
-                ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
-                ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
-                ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
-                ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
-                ("clock_period".into(), self.clock_period.to_string()),
-                ("clock_12h".into(), (self.clock_12h as u8).to_string()),
-                ("show_battery".into(), (self.show_battery as u8).to_string()),
-                ("read_notifications".into(),(self.read_notifications as u8).to_string()),
-                ("notification_preview".into(),(self.notification_preview as u8).to_string()),
-                ("system_hud".into(), (self.system_hud as u8).to_string()),
-                ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
-                ("notifications".into(), (self.notifications as u8).to_string()),
-                ("sound".into(), (self.sound as u8).to_string()),
-                ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
-                ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
-                ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
-                ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
-                ("focus_minutes".into(), self.focus_minutes.to_string()),
-                ("rest_minutes".into(), self.rest_minutes.to_string()),
-                ("water_minutes".into(), self.water_minutes.to_string()),
-                ("serving_ml".into(), self.serving_ml.to_string()),
-                ("water_start".into(), self.water_start.to_string()),
-                ("water_end".into(), self.water_end.to_string()),
-                ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
-                ("mail_code".into(), (self.mail_code as u8).to_string()),
-                ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
-                ("mail_interval".into(), self.mail_interval.to_string()),
-                ("mail_ics".into(), self.mail_ics.to_string()),
-                ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
-                ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
-                ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
-            ],
-        );
+        self.save_to(&config_dir().join("settings.txt"));
+    }
+
+    fn save_to(&self, path: &Path) {
+        let mut pairs = read_kv(path);
+        for (key, value) in self.kv() {
+            match pairs.iter_mut().find(|(existing, _)| existing == &key) {
+                Some((_, slot)) => *slot = value,
+                None => pairs.push((key, value)),
+            }
+        }
+        // 旧别名在读取时已折算成新键，保存时清掉；其余未知键保留，
+        // 避免旧版本回退后把新版本写入的配置整表删掉。
+        const LEGACY: [&str; 3] = ["short_minutes", "long_minutes", "material"];
+        let mut seen = std::collections::HashSet::new();
+        pairs.retain(|(key, _)| !LEGACY.contains(&key.as_str()) && seen.insert(key.clone()));
+        let _ = write_kv(path, &pairs);
+    }
+
+    fn kv(&self) -> Vec<(String, String)> {
+        vec![
+            ("version".into(), SETTINGS_VERSION.to_string()),
+            ("display_id".into(), self.display_id.clone()),
+            ("island_mode".into(), self.island_mode.key().into()),
+            ("ui_scale".into(), self.ui_scale.to_string()),
+            ("solid_black".into(), (self.solid_black as u8).to_string()),
+            ("settings_theme".into(), self.settings_theme.key().into()),
+            ("pet".into(), (self.pet as u8).to_string()),
+            ("minimal".into(), (self.minimal as u8).to_string()),
+            ("browser_minimal".into(), (self.browser_minimal as u8).to_string()),
+            ("avoid_browsers".into(), (self.avoid_browsers as u8).to_string()),
+            ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
+            ("visible_pages".into(), self.visible_pages.iter().map(|enabled| if *enabled { '1' } else { '0' }).collect()),
+            ("page_order".into(), self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+            ("resident_order".into(), self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+            ("clock_period".into(), self.clock_period.to_string()),
+            ("clock_12h".into(), (self.clock_12h as u8).to_string()),
+            ("show_battery".into(), (self.show_battery as u8).to_string()),
+            ("read_notifications".into(), (self.read_notifications as u8).to_string()),
+            ("notification_preview".into(), (self.notification_preview as u8).to_string()),
+            ("system_hud".into(), (self.system_hud as u8).to_string()),
+            ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
+            ("notifications".into(), (self.notifications as u8).to_string()),
+            ("sound".into(), (self.sound as u8).to_string()),
+            ("lyrics_enabled".into(), (self.lyrics_enabled as u8).to_string()),
+            ("island_lyrics".into(), (self.island_lyrics as u8).to_string()),
+            ("lyric_delay_ms".into(), self.lyric_delay_ms.to_string()),
+            ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
+            ("focus_minutes".into(), self.focus_minutes.to_string()),
+            ("rest_minutes".into(), self.rest_minutes.to_string()),
+            ("water_minutes".into(), self.water_minutes.to_string()),
+            ("serving_ml".into(), self.serving_ml.to_string()),
+            ("water_start".into(), self.water_start.to_string()),
+            ("water_end".into(), self.water_end.to_string()),
+            ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
+            ("mail_code".into(), (self.mail_code as u8).to_string()),
+            ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
+            ("mail_interval".into(), self.mail_interval.to_string()),
+            ("mail_ics".into(), self.mail_ics.to_string()),
+            ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
+            ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
+            ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
+        ]
     }
 }
 
@@ -544,6 +603,73 @@ mod tests {
         for worker in workers{worker.join().unwrap().unwrap();}
         let content=fs::read(&path).unwrap();assert_eq!(content.len(),128*1024);assert!(content.iter().all(|b|*b==content[0]));
         assert_eq!(fs::read_dir(&dir).unwrap().count(),1);fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_save_keeps_unknown_keys_and_drops_legacy_aliases() {
+        let dir=std::env::temp_dir().join(format!("daozai-settings-merge-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("settings.txt");
+        fs::write(&path,"future_feature=on\npet=0\nshort_minutes=9\n").unwrap();
+        let mut s=Settings::load_from(&path);
+        assert!(!s.pet);
+        assert_eq!(s.rest_minutes,9);
+        s.pet=true;
+        s.save_to(&path);
+        let text=fs::read_to_string(&path).unwrap();
+        assert!(text.lines().any(|line|line=="future_feature=on"),"未知键必须保留：{text}");
+        assert!(text.lines().any(|line|line=="pet=1"));
+        assert!(text.lines().any(|line|line==format!("version={SETTINGS_VERSION}")));
+        assert!(!text.contains("short_minutes"),"旧别名应在保存时清除：{text}");
+        assert!(Settings::load_from(&path).pet);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn default_page_tables_match_page_specs() {
+        let settings=Settings::default();
+        assert_eq!(settings.visible_pages.len(),crate::page_spec::COUNT);
+        assert_eq!(settings.page_order.len(),crate::page_spec::COUNT);
+        let mut order=settings.page_order;
+        order.sort_unstable();
+        assert_eq!(order.to_vec(),(0..crate::page_spec::COUNT).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn island_mode_roundtrips_and_unknown_values_fall_back() {
+        assert_eq!(IslandMode::parse("line"), IslandMode::Line);
+        assert_eq!(IslandMode::parse("HIDDEN"), IslandMode::Hidden);
+        assert_eq!(IslandMode::parse("unknown"), IslandMode::Normal);
+        let dir=std::env::temp_dir().join(format!("daozai-island-mode-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("settings.txt");
+        let mut settings=Settings::default();
+        assert_eq!(settings.island_mode,IslandMode::Normal);
+        for mode in IslandMode::ALL {
+            settings.island_mode=mode;
+            settings.save_to(&path);
+            assert_eq!(Settings::load_from(&path).island_mode,mode);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scale_and_solid_black_roundtrip_and_clamp() {
+        let dir=std::env::temp_dir().join(format!("daozai-scale-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("settings.txt");
+        let mut settings=Settings::default();
+        assert_eq!(settings.ui_scale,100);assert!(!settings.solid_black);assert_eq!(settings.scale(),1.0);
+        settings.ui_scale=180;settings.solid_black=true;settings.save_to(&path);
+        let loaded=Settings::load_from(&path);
+        assert_eq!(loaded.ui_scale,180);assert!(loaded.solid_black);assert_eq!(loaded.scale(),1.8);
+        fs::write(&path,"ui_scale=250\n").unwrap();
+        assert_eq!(Settings::load_from(&path).ui_scale,180,"缩放不能超过 180%");
+        fs::write(&path,"ui_scale=40\n").unwrap();
+        assert_eq!(Settings::load_from(&path).ui_scale,90,"缩放不能低于 90%");
+        fs::write(&path,"ui_scale=90\n").unwrap();
+        assert_eq!(Settings::load_from(&path).ui_scale,90);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

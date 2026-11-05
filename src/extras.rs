@@ -1,6 +1,7 @@
 //! 设置、通知队列与岛仔表情。
 use crate::settings_theme::color as settings_color;
-use crate::app::{App, Cmd, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_NAMES};
+use crate::app::{App, Cmd, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W};
+use crate::page_spec::SPECS;
 use crate::paint::{Card, H};
 use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
@@ -630,7 +631,8 @@ impl App {
     pub(crate) fn task_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){
         let Some(d)=self.task_dialog.as_mut() else{return};
         if d.reminder_only || d.picker.open{return;}
-        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0,35.0),egui::vec2(260.0,17.0)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5,W::Regular)));
+        let s=self.settings.scale()/ui.ctx().zoom_factor().max(0.1);
+        let name=ui.put(Rect::from_min_size(origin+egui::vec2(97.0*s,35.0*s),egui::vec2(260.0*s,17.0*s)),egui::TextEdit::singleline(&mut d.text).vertical_align(egui::Align::Center).id(egui::Id::new("task-name-edit")).frame(false).font(theme::font(11.5*s,W::Regular)));
         let first_focus=!d.focused;
         if first_focus{name.request_focus();d.focused=true;cmds.push(Cmd::Focus);}
         // 新建内容与下一步共用这一帧，避免同一次回车又提交了空提醒。
@@ -868,9 +870,22 @@ impl App {
         self.updates.poll(ctx);
         self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
+        let zoom_delta=ctx.input(|input|input.zoom_delta());
+        if (zoom_delta-1.0).abs()>1e-3 {
+            let zoom=(self.settings_zoom*zoom_delta).clamp(0.8,2.0);
+            if (zoom-self.settings_zoom).abs()>1e-3 {
+                self.settings_zoom=zoom;
+                ctx.set_zoom_factor(zoom);
+            }
+        }
         let id=egui::ViewportId::from_hash_of("daozai-settings");
         let focus_requested=std::mem::take(&mut self.settings_focus_requested);
-        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0,560.0]).with_min_inner_size([600.0,450.0]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
+        let viewport_scale=self.settings_zoom;
+        if (self.settings_window_zoom-viewport_scale).abs()>1e-3 {
+            self.settings_window_zoom=viewport_scale;
+            ctx.send_viewport_cmd_to(id,egui::ViewportCommand::InnerSize(egui::vec2(690.0*viewport_scale,560.0*viewport_scale)));
+        }
+        ctx.show_viewport_immediate(id,egui::ViewportBuilder::default().with_title("岛仔设置").with_icon(theme::app_icon()).with_inner_size([690.0*viewport_scale,560.0*viewport_scale]).with_min_inner_size([600.0*viewport_scale,450.0*viewport_scale]).with_visible(false).with_active(false).with_window_level(egui::WindowLevel::Normal),|ctx,_|{
             let dark=self.settings.settings_theme.dark(crate::settings_theme::system_dark(ctx));
             let original_style=ctx.style();
             let mut style=(*original_style).clone();
@@ -961,9 +976,12 @@ impl App {
                             ui.separator();
                             setting_row(ui,"岛上歌词","收起时显示正在唱的那一句",&mut self.settings.island_lyrics);
                         });
+                        settings_label(ui,"外观");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"底色全黑","保留纯黑底，关闭玻璃半透明和边缘光",&mut self.settings.solid_black);
+                        });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -978,7 +996,7 @@ impl App {
                                         ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)));
                                     }}
                                     handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
-                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
+                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,SPECS[page].name,SPECS[page].description,&mut visible);});
                                 })).inner.response;
                                 if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
                                     if payload.0!=page {
@@ -1062,8 +1080,26 @@ impl App {
                             });
                             ui.label(egui::RichText::new("详细时段：凌晨、上午、中午、下午、傍晚、晚上").size(11.0).color(ui.visuals().weak_text_color()));
                             ui.separator();
+                            ui.horizontal(|ui|{
+                                ui.add_sized([56.0,30.0],egui::Label::new("岛仔显示"));
+                                for mode in crate::model::IslandMode::ALL {
+                                    if ui.add_sized([64.0,30.0],egui::SelectableLabel::new(self.settings.island_mode==mode,mode.label())).clicked(){self.settings.island_mode=mode;}
+                                }
+                            });
+                            ui.label(egui::RichText::new("横线：收起时只显示 2px 细线，单击展开，不响应悬停；隐藏：完全收起，仍可从托盘打开设置。").size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.horizontal(|ui|{
+                                ui.add_sized([56.0,30.0],egui::Label::new("界面大小"));
+                                let mut scale=self.settings.ui_scale as f32;
+                                if ui.add(egui::Slider::new(&mut scale,90.0..=180.0).suffix("%").step_by(5.0)).changed(){
+                                    self.settings.ui_scale=scale.round() as u16;
+                                }
+                            });
+                            ui.label(egui::RichText::new("90%–180%：岛体单独缩放；设置窗口用 Ctrl+加号/滚轮调整。高缩放在小屏幕上可能超出可用区域。").size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.separator();
                             let mut minimal=self.settings.minimal;
-                            setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);
+                            ui.add_enabled_ui(self.settings.island_mode==crate::model::IslandMode::Normal,|ui|{
+                                setting_row(ui,"极简刘海","收起时显示 44×4.5 短条，悬停展开",&mut minimal);
+                            });
                             if minimal!=self.settings.minimal {self.set_minimal(minimal);}
                             ui.separator();
 
